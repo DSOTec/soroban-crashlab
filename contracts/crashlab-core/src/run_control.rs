@@ -9,6 +9,7 @@
 //! execute only the seed indices assigned to one worker while preserving the same
 //! global iteration order and cancellation points as [`drive_run`].
 
+use crate::checkpoint::{CheckpointError, RunCheckpoint};
 use crate::worker_partition::WorkerPartition;
 use std::fs;
 use std::io;
@@ -38,24 +39,32 @@ pub enum RunTerminalState {
     Failed { message: String },
 }
 
-/// Deterministic worker partitioning for parallel execution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct WorkerPartition {
-    pub index: u64,
-    pub total: u64,
+/// Validation failures when resuming a run from a persisted checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunResumeError {
+    /// The persisted checkpoint cannot be applied to the requested campaign/schedule.
+    Checkpoint(CheckpointError),
+    /// `total_seeds` could not be represented as a checkpoint length on this platform.
+    TotalSeedsOverflow { total_seeds: u64 },
 }
 
-impl WorkerPartition {
-    /// Creates a new `WorkerPartition`. Panics if `total == 0` or `index >= total`.
-    pub fn new(index: u64, total: u64) -> Self {
-        assert!(total > 0, "total workers must be greater than 0");
-        assert!(index < total, "worker index must be less than total workers");
-        Self { index, total }
+impl std::fmt::Display for RunResumeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RunResumeError::Checkpoint(err) => err.fmt(f),
+            RunResumeError::TotalSeedsOverflow { total_seeds } => write!(
+                f,
+                "total_seeds {total_seeds} exceeds the supported checkpoint range on this platform"
+            ),
+        }
     }
+}
 
-    /// Returns true if this worker is responsible for the given seed index.
-    pub const fn owns(&self, seed_index: u64) -> bool {
-        (seed_index % self.total) == self.index
+impl std::error::Error for RunResumeError {}
+
+impl From<CheckpointError> for RunResumeError {
+    fn from(value: CheckpointError) -> Self {
+        Self::Checkpoint(value)
     }
 }
 
@@ -167,12 +176,6 @@ where
 {
     let mut seeds_processed = 0u64;
     for seed_index in 0..total_seeds {
-        if let Some(p) = &partition {
-            if !p.owns(seed_index) {
-                continue;
-            }
-        }
-
         if signal.is_cancelled() {
             return RunTerminalState::Cancelled {
                 summary: RunSummary {
@@ -180,6 +183,12 @@ where
                     cancelled_at_seed: Some(seed_index),
                 },
             };
+        }
+
+        if let Some(p) = &partition {
+            if !p.owns_seed(seed_index) {
+                continue;
+            }
         }
         if let Err(message) = work(seed_index) {
             return RunTerminalState::Failed { message };
@@ -235,10 +244,112 @@ where
     }
 }
 
+fn validate_resume_checkpoint(
+    checkpoint: &RunCheckpoint,
+    campaign_id: &str,
+    total_seeds: u64,
+) -> Result<usize, RunResumeError> {
+    let total_seeds = usize::try_from(total_seeds)
+        .map_err(|_| RunResumeError::TotalSeedsOverflow { total_seeds })?;
+    checkpoint.validate_run(campaign_id, total_seeds)?;
+    Ok(total_seeds)
+}
+
+/// Resumes a single-worker run from a persisted checkpoint without reprocessing
+/// seeds whose indices are already below `checkpoint.next_seed_index`.
+///
+/// The checkpoint is advanced only after a seed has been fully accounted for, so
+/// cancellation and failures leave the next unprocessed seed in place for a later retry.
+pub fn drive_run_from_checkpoint<F>(
+    _run_id: RunId,
+    campaign_id: &str,
+    checkpoint: &mut RunCheckpoint,
+    total_seeds: u64,
+    signal: &CancelSignal,
+    mut work: F,
+) -> Result<RunTerminalState, RunResumeError>
+where
+    F: FnMut(u64) -> Result<(), String>,
+{
+    let total_seeds = validate_resume_checkpoint(checkpoint, campaign_id, total_seeds)? as u64;
+    let mut seeds_processed = 0u64;
+
+    for seed_index in checkpoint.next_seed_index as u64..total_seeds {
+        if signal.is_cancelled() {
+            return Ok(RunTerminalState::Cancelled {
+                summary: RunSummary {
+                    seeds_processed,
+                    cancelled_at_seed: Some(seed_index),
+                },
+            });
+        }
+        if let Err(message) = work(seed_index) {
+            return Ok(RunTerminalState::Failed { message });
+        }
+        checkpoint.next_seed_index = seed_index as usize + 1;
+        seeds_processed += 1;
+    }
+
+    Ok(RunTerminalState::Completed {
+        summary: RunSummary {
+            seeds_processed,
+            cancelled_at_seed: None,
+        },
+    })
+}
+
+/// Resumes a worker-partitioned run from a per-worker checkpoint.
+///
+/// The checkpoint stores the next global seed index this worker should inspect.
+/// Unowned indices are still advanced past so a resumed worker does not rescan
+/// earlier parts of the global timeline.
+pub fn drive_run_partitioned_from_checkpoint<F>(
+    _run_id: RunId,
+    campaign_id: &str,
+    checkpoint: &mut RunCheckpoint,
+    total_seeds: u64,
+    partition: &WorkerPartition,
+    signal: &CancelSignal,
+    mut work: F,
+) -> Result<RunTerminalState, RunResumeError>
+where
+    F: FnMut(u64) -> Result<(), String>,
+{
+    let total_seeds = validate_resume_checkpoint(checkpoint, campaign_id, total_seeds)? as u64;
+    let mut seeds_processed = 0u64;
+
+    for seed_index in checkpoint.next_seed_index as u64..total_seeds {
+        if signal.is_cancelled() {
+            return Ok(RunTerminalState::Cancelled {
+                summary: RunSummary {
+                    seeds_processed,
+                    cancelled_at_seed: Some(seed_index),
+                },
+            });
+        }
+        if !partition.owns_seed(seed_index) {
+            checkpoint.next_seed_index = seed_index as usize + 1;
+            continue;
+        }
+        if let Err(message) = work(seed_index) {
+            return Ok(RunTerminalState::Failed { message });
+        }
+        checkpoint.next_seed_index = seed_index as usize + 1;
+        seeds_processed += 1;
+    }
+
+    Ok(RunTerminalState::Completed {
+        summary: RunSummary {
+            seeds_processed,
+            cancelled_at_seed: None,
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::worker_partition::WorkerPartition;
+    use crate::{worker_partition::WorkerPartition, CaseSeed};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn unique_tmp() -> PathBuf {
@@ -326,20 +437,20 @@ mod tests {
         }
         let _ = fs::remove_dir_all(&base);
     }
-    
+
     #[test]
     fn drive_run_respects_worker_partition() {
         let id = RunId(4);
         let signal = CancelSignal::new(id);
-        
-        let partition = WorkerPartition::new(1, 3);
-        
+
+        let partition = WorkerPartition::try_new(1, 3).expect("partition");
+
         let mut seen = Vec::new();
         let outcome = drive_run(id, 10, &signal, Some(partition), |i| {
             seen.push(i);
             Ok(())
         });
-        
+
         match outcome {
             RunTerminalState::Completed { summary } => {
                 // 10 seeds: 0..9.
@@ -358,6 +469,8 @@ mod tests {
                 assert_eq!(seen, vec![1, 4, 7]);
             }
             other => panic!("expected completed, got {other:?}"),
+        }
+    }
 
     #[test]
     fn drive_run_partitioned_matches_seed_count_per_worker() {
@@ -396,6 +509,137 @@ mod tests {
                 assert_eq!(summary.cancelled_at_seed, Some(0));
             }
             other => panic!("expected cancelled, got {other:?}"),
+        }
+    }
+
+    fn seeds(n: usize) -> Vec<CaseSeed> {
+        (0..n)
+            .map(|i| CaseSeed {
+                id: i as u64,
+                payload: vec![i as u8],
+            })
+            .collect()
+    }
+
+    #[test]
+    fn drive_run_from_checkpoint_skips_completed_seeds() {
+        let id = RunId(12);
+        let signal = CancelSignal::new(id);
+        let seeds = seeds(6);
+        let mut checkpoint = RunCheckpoint::new_run("campaign-1", &seeds);
+        checkpoint.advance_by(3);
+
+        let mut seen = Vec::new();
+        let outcome = drive_run_from_checkpoint(
+            id,
+            "campaign-1",
+            &mut checkpoint,
+            seeds.len() as u64,
+            &signal,
+            |seed_index| {
+                seen.push(seed_index);
+                Ok(())
+            },
+        )
+        .expect("resume succeeds");
+
+        match outcome {
+            RunTerminalState::Completed { summary } => {
+                assert_eq!(summary.seeds_processed, 3);
+                assert_eq!(seen, vec![3, 4, 5]);
+                assert_eq!(checkpoint.next_seed_index, seeds.len());
+            }
+            other => panic!("expected completed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn drive_run_from_checkpoint_rejects_campaign_mismatch() {
+        let id = RunId(13);
+        let signal = CancelSignal::new(id);
+        let seeds = seeds(3);
+        let mut checkpoint = RunCheckpoint::new_run("campaign-1", &seeds);
+
+        let err = drive_run_from_checkpoint(
+            id,
+            "campaign-2",
+            &mut checkpoint,
+            seeds.len() as u64,
+            &signal,
+            |_seed_index| Ok(()),
+        )
+        .expect_err("campaign mismatch should fail");
+
+        assert!(matches!(
+            err,
+            RunResumeError::Checkpoint(CheckpointError::CampaignMismatch { .. })
+        ));
+        assert_eq!(checkpoint.next_seed_index, 0);
+    }
+
+    #[test]
+    fn drive_run_from_checkpoint_leaves_failed_seed_for_retry() {
+        let id = RunId(14);
+        let signal = CancelSignal::new(id);
+        let seeds = seeds(5);
+        let mut checkpoint = RunCheckpoint::new_run("campaign-1", &seeds);
+        checkpoint.advance_by(2);
+
+        let outcome = drive_run_from_checkpoint(
+            id,
+            "campaign-1",
+            &mut checkpoint,
+            seeds.len() as u64,
+            &signal,
+            |seed_index| {
+                if seed_index == 3 {
+                    return Err("seed 3 failed".to_string());
+                }
+                Ok(())
+            },
+        )
+        .expect("resume call should validate");
+
+        assert_eq!(
+            outcome,
+            RunTerminalState::Failed {
+                message: "seed 3 failed".to_string()
+            }
+        );
+        assert_eq!(checkpoint.next_seed_index, 3);
+    }
+
+    #[test]
+    fn drive_run_partitioned_from_checkpoint_uses_global_cursor() {
+        let id = RunId(15);
+        let signal = CancelSignal::new(id);
+        let seeds = seeds(8);
+        let mut checkpoint = RunCheckpoint::new_run("campaign-1", &seeds);
+        checkpoint.advance_by(2);
+        let partition = WorkerPartition::try_new(1, 3).expect("partition");
+
+        let mut seen = Vec::new();
+        let outcome = drive_run_partitioned_from_checkpoint(
+            id,
+            "campaign-1",
+            &mut checkpoint,
+            seeds.len() as u64,
+            &partition,
+            &signal,
+            |seed_index| {
+                seen.push(seed_index);
+                Ok(())
+            },
+        )
+        .expect("resume succeeds");
+
+        match outcome {
+            RunTerminalState::Completed { summary } => {
+                assert_eq!(summary.seeds_processed, 2);
+                assert_eq!(seen, vec![4, 7]);
+                assert_eq!(checkpoint.next_seed_index, seeds.len());
+            }
+            other => panic!("expected completed, got {other:?}"),
         }
     }
 }

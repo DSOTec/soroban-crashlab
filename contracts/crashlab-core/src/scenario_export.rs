@@ -1,5 +1,8 @@
 use crate::CaseBundle;
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 /// Normalized JSON scenario for cross-tool reuse.
 ///
@@ -70,6 +73,45 @@ pub fn export_scenario_json(
     serde_json::to_string_pretty(&scenario)
 }
 
+/// Exports a failing seed as a normalized JSON scenario for cross-tool reuse.
+///
+/// This is a focused variant of [`export_scenario_json`] that explicitly
+/// documents the "failing seed" contract: the exported JSON always includes
+/// the `seed_id`, hex-encoded `input_payload`, `mode`, and `failure_class`.
+/// The output is stable and deterministic for the same input, making it
+/// suitable for regression archives, replay harnesses, and external tools.
+///
+/// For sanitized public sharing (scrubbing secret-like fragments) use
+/// [`crate::export_sanitized_scenario_json`] instead.
+///
+/// # Errors
+///
+/// Returns a [`serde_json::Error`] if JSON serialization fails (in practice
+/// this does not happen for well-formed strings, but callers should handle it).
+///
+/// # Example
+///
+/// ```rust
+/// use crashlab_core::{to_bundle, CaseSeed};
+/// use crashlab_core::scenario_export::export_failing_seed_json;
+///
+/// let bundle = to_bundle(CaseSeed { id: 7, payload: vec![0x01, 0x02, 0x03] });
+/// let json = export_failing_seed_json(&bundle, "invoker").unwrap();
+///
+/// // The output round-trips through serde_json.
+/// let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+/// assert_eq!(parsed["seed_id"], 7);
+/// assert_eq!(parsed["mode"], "invoker");
+/// assert!(!parsed["input_payload"].as_str().unwrap().is_empty());
+/// assert!(!parsed["failure_class"].as_str().unwrap().is_empty());
+/// ```
+pub fn export_failing_seed_json(
+    bundle: &CaseBundle,
+    mode: impl Into<String>,
+) -> Result<String, serde_json::Error> {
+    export_scenario_json(bundle, mode)
+}
+
 /// Exports a collection of bundles as a deterministically ordered JSON suite.
 ///
 /// Scenarios are sorted by `(seed_id, failure_class)` before serialization so
@@ -102,6 +144,8 @@ pub fn export_suite_json(
         a.seed_id
             .cmp(&b.seed_id)
             .then_with(|| a.failure_class.cmp(&b.failure_class))
+            .then_with(|| a.input_payload.cmp(&b.input_payload))
+            .then_with(|| a.mode.cmp(&b.mode))
     });
     serde_json::to_string_pretty(&scenarios)
 }
@@ -211,6 +255,107 @@ pub fn export_rust_regression_fixture(
     test_name: &str,
 ) -> Result<String, String> {
     format_rust_regression_test_fn(bundle, test_name)
+}
+
+/// Derives a deterministic, valid Rust identifier for a test function from a bundle.
+///
+/// The name follows the pattern: `regression_seed_{id}_{hash_prefix}` where:
+/// - `id` is the seed ID
+/// - `hash_prefix` is the first 8 hex characters of the FNV-1a hash of the payload
+///
+/// This ensures:
+/// - Determinism: same bundle always produces the same name
+/// - Uniqueness: different bundles produce different names (with high probability)
+/// - Validity: the result is always a valid Rust identifier
+///
+/// # Example
+///
+/// ```rust
+/// use crashlab_core::{to_bundle, CaseSeed};
+/// use crashlab_core::scenario_export::derive_test_name;
+///
+/// let bundle = to_bundle(CaseSeed { id: 42, payload: vec![1, 2, 3] });
+/// let name = derive_test_name(&bundle);
+/// assert!(name.starts_with("regression_seed_42_"));
+/// assert_eq!(name.len(), "regression_seed_42_".len() + 8);
+/// ```
+pub fn derive_test_name(bundle: &CaseBundle) -> String {
+    // Use FNV-1a hash (same as compute_signature_hash but only on payload)
+    const FNV_OFFSET: u64 = 14695981039346656037;
+    const FNV_PRIME: u64 = 1099511628211;
+
+    let mut hash = FNV_OFFSET;
+    for byte in &bundle.seed.payload {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+
+    // Take first 8 hex characters for brevity
+    let hash_prefix = format!("{:016x}", hash);
+    let hash_short = &hash_prefix[..8];
+
+    format!("regression_seed_{}_{}", bundle.seed.id, hash_short)
+}
+
+/// Writes a Rust regression test snippet to a file.
+///
+/// This function:
+/// 1. Derives a deterministic test function name from the bundle
+/// 2. Generates the Rust test snippet using `export_rust_regression_fixture`
+/// 3. Writes the snippet to the specified output path
+/// 4. Returns the path where the snippet was written
+///
+/// The output file will have a `.rs` extension. If the provided path does not
+/// end with `.rs`, the extension will be appended.
+///
+/// # Arguments
+///
+/// * `bundle` - The failing case bundle to export
+/// * `output_path` - The file path where the snippet should be written
+///
+/// # Returns
+///
+/// The canonical path where the snippet was written, or an error if:
+/// - The test name derivation fails
+/// - The snippet generation fails
+/// - The file write fails
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use crashlab_core::{to_bundle, CaseSeed};
+/// use crashlab_core::scenario_export::write_rust_regression_snippet;
+/// use std::path::Path;
+///
+/// let bundle = to_bundle(CaseSeed { id: 42, payload: vec![1, 2, 3] });
+/// let path = write_rust_regression_snippet(&bundle, Path::new("./failing_42.rs")).unwrap();
+/// println!("Snippet written to: {}", path.display());
+/// ```
+pub fn write_rust_regression_snippet(
+    bundle: &CaseBundle,
+    output_path: &Path,
+) -> Result<PathBuf, String> {
+    // Derive deterministic test name
+    let test_name = derive_test_name(bundle);
+
+    // Generate the snippet
+    let snippet = export_rust_regression_fixture(bundle, &test_name)?;
+
+    // Ensure .rs extension
+    let output_path = if output_path.extension().and_then(|s| s.to_str()) == Some("rs") {
+        output_path.to_path_buf()
+    } else {
+        output_path.with_extension("rs")
+    };
+
+    // Write to file
+    let mut file = fs::File::create(&output_path)
+        .map_err(|e| format!("failed to create output file: {}", e))?;
+
+    file.write_all(snippet.as_bytes())
+        .map_err(|e| format!("failed to write snippet: {}", e))?;
+
+    Ok(output_path)
 }
 
 #[cfg(test)]
@@ -419,5 +564,302 @@ mod tests {
         assert!(md.contains(&bundle.signature.digest.to_string()));
         assert!(md.contains(&bundle.signature.signature_hash.to_string()));
         assert!(md.contains("cargo run --bin replay-single-seed"));
+    }
+
+    // ── export_failing_seed_json ───────────────────────────────────────────────
+
+    #[test]
+    fn export_failing_seed_json_produces_valid_json() {
+        let bundle = to_bundle(CaseSeed {
+            id: 42,
+            payload: vec![0x10, 0x20, 0x30],
+        });
+
+        let json = export_failing_seed_json(&bundle, "invoker").unwrap();
+
+        let parsed: FailureScenario = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.seed_id, 42);
+        assert_eq!(parsed.mode, "invoker");
+        assert!(!parsed.input_payload.is_empty());
+        assert!(!parsed.failure_class.is_empty());
+    }
+
+    #[test]
+    fn export_failing_seed_json_matches_export_scenario_json() {
+        // The two functions must produce identical output for the same inputs
+        // so consumers can rely on either API without divergence.
+        let bundle = to_bundle(CaseSeed {
+            id: 99,
+            payload: vec![0xFF, 0x01],
+        });
+
+        let from_failing = export_failing_seed_json(&bundle, "contract").unwrap();
+        let from_generic = export_scenario_json(&bundle, "contract").unwrap();
+
+        assert_eq!(
+            from_failing, from_generic,
+            "export_failing_seed_json and export_scenario_json must produce identical output"
+        );
+    }
+
+    #[test]
+    fn export_failing_seed_json_contains_all_required_keys() {
+        let bundle = to_bundle(CaseSeed {
+            id: 5,
+            payload: vec![0xAB],
+        });
+
+        let json = export_failing_seed_json(&bundle, "none").unwrap();
+
+        assert!(json.contains("\"seed_id\""), "missing seed_id field");
+        assert!(json.contains("\"input_payload\""), "missing input_payload field");
+        assert!(json.contains("\"mode\""), "missing mode field");
+        assert!(json.contains("\"failure_class\""), "missing failure_class field");
+    }
+
+    #[test]
+    fn export_failing_seed_json_is_deterministic_for_same_seed() {
+        let bundle = to_bundle(CaseSeed {
+            id: 17,
+            payload: vec![0x01, 0x02],
+        });
+
+        let json1 = export_failing_seed_json(&bundle, "invoker").unwrap();
+        let json2 = export_failing_seed_json(&bundle, "invoker").unwrap();
+
+        assert_eq!(
+            json1, json2,
+            "repeated exports of the same bundle must produce identical JSON"
+        );
+    }
+
+    #[test]
+    fn export_failing_seed_json_empty_payload_is_accepted() {
+        let bundle = to_bundle(CaseSeed {
+            id: 0,
+            payload: vec![],
+        });
+
+        let json = export_failing_seed_json(&bundle, "none").unwrap();
+
+        let parsed: FailureScenario = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.seed_id, 0);
+        assert_eq!(parsed.input_payload, "");
+        assert_eq!(parsed.failure_class, "empty-input");
+    }
+
+    // ── derive_test_name ──────────────────────────────────────────────────────
+
+    #[test]
+    fn derive_test_name_is_deterministic() {
+        let bundle = to_bundle(CaseSeed {
+            id: 42,
+            payload: vec![1, 2, 3],
+        });
+
+        let name1 = derive_test_name(&bundle);
+        let name2 = derive_test_name(&bundle);
+
+        assert_eq!(name1, name2);
+    }
+
+    #[test]
+    fn derive_test_name_is_valid_rust_identifier() {
+        let bundle = to_bundle(CaseSeed {
+            id: 123,
+            payload: vec![0xAA, 0xBB, 0xCC],
+        });
+
+        let name = derive_test_name(&bundle);
+
+        // Must start with letter or underscore
+        assert!(name.chars().next().unwrap().is_ascii_alphabetic() || name.starts_with('_'));
+        // Must contain only alphanumeric and underscores
+        assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+    }
+
+    #[test]
+    fn derive_test_name_includes_seed_id() {
+        let bundle = to_bundle(CaseSeed {
+            id: 999,
+            payload: vec![1],
+        });
+
+        let name = derive_test_name(&bundle);
+
+        assert!(name.contains("999"));
+    }
+
+    #[test]
+    fn derive_test_name_differs_for_different_payloads() {
+        let bundle1 = to_bundle(CaseSeed {
+            id: 1,
+            payload: vec![1, 2, 3],
+        });
+        let bundle2 = to_bundle(CaseSeed {
+            id: 1,
+            payload: vec![3, 2, 1],
+        });
+
+        let name1 = derive_test_name(&bundle1);
+        let name2 = derive_test_name(&bundle2);
+
+        assert_ne!(name1, name2);
+    }
+
+    #[test]
+    fn derive_test_name_differs_for_different_seed_ids() {
+        let bundle1 = to_bundle(CaseSeed {
+            id: 1,
+            payload: vec![1, 2, 3],
+        });
+        let bundle2 = to_bundle(CaseSeed {
+            id: 2,
+            payload: vec![1, 2, 3],
+        });
+
+        let name1 = derive_test_name(&bundle1);
+        let name2 = derive_test_name(&bundle2);
+
+        assert_ne!(name1, name2);
+    }
+
+    #[test]
+    fn derive_test_name_handles_empty_payload() {
+        let bundle = to_bundle(CaseSeed {
+            id: 0,
+            payload: vec![],
+        });
+
+        let name = derive_test_name(&bundle);
+
+        assert!(name.starts_with("regression_seed_0_"));
+        assert!(is_valid_rust_ident(&name));
+    }
+
+    #[test]
+    fn derive_test_name_format() {
+        let bundle = to_bundle(CaseSeed {
+            id: 42,
+            payload: vec![0x01, 0x02],
+        });
+
+        let name = derive_test_name(&bundle);
+
+        // Should be: regression_seed_{id}_{8_hex_chars}
+        assert!(name.starts_with("regression_seed_42_"));
+        let parts: Vec<&str> = name.split('_').collect();
+        assert_eq!(parts.len(), 4); // regression, seed, id, hash
+        assert_eq!(parts[3].len(), 8); // hash prefix is 8 chars
+        assert!(parts[3].chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ── write_rust_regression_snippet ────────────────────────────────────────
+
+    #[test]
+    fn write_snippet_creates_file_with_valid_rust_code() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let bundle = to_bundle(CaseSeed {
+            id: 77,
+            payload: vec![0x10, 0x20, 0x30],
+        });
+
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let tmp_path = std::env::temp_dir().join(format!("test_snippet_{}.rs", n));
+
+        let written_path = write_rust_regression_snippet(&bundle, &tmp_path).unwrap();
+
+        assert!(written_path.exists());
+        assert_eq!(written_path.extension().unwrap(), "rs");
+
+        let content = fs::read_to_string(&written_path).unwrap();
+        assert!(content.contains("#[test]"));
+        assert!(content.contains("fn regression_seed_77_"));
+        assert!(content.contains("CaseBundle"));
+        assert!(content.contains("replay_seed_bundle"));
+
+        let _ = fs::remove_file(&written_path);
+    }
+
+    #[test]
+    fn write_snippet_adds_rs_extension_if_missing() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let bundle = to_bundle(CaseSeed {
+            id: 88,
+            payload: vec![0xAA],
+        });
+
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let tmp_path = std::env::temp_dir().join(format!("test_snippet_{}", n));
+
+        let written_path = write_rust_regression_snippet(&bundle, &tmp_path).unwrap();
+
+        assert_eq!(written_path.extension().unwrap(), "rs");
+
+        let _ = fs::remove_file(&written_path);
+    }
+
+    #[test]
+    fn write_snippet_preserves_rs_extension() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let bundle = to_bundle(CaseSeed {
+            id: 99,
+            payload: vec![0xFF],
+        });
+
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let tmp_path = std::env::temp_dir().join(format!("test_snippet_{}.rs", n));
+
+        let written_path = write_rust_regression_snippet(&bundle, &tmp_path).unwrap();
+
+        assert_eq!(written_path.extension().unwrap(), "rs");
+        // Should not have double extension
+        assert!(!written_path.to_string_lossy().ends_with(".rs.rs"));
+
+        let _ = fs::remove_file(&written_path);
+    }
+
+    #[test]
+    fn write_snippet_output_is_deterministic() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let bundle = to_bundle(CaseSeed {
+            id: 111,
+            payload: vec![0x11, 0x22],
+        });
+
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let tmp_path1 = std::env::temp_dir().join(format!("test_snippet_{}a.rs", n));
+        let tmp_path2 = std::env::temp_dir().join(format!("test_snippet_{}b.rs", n));
+
+        let written_path1 = write_rust_regression_snippet(&bundle, &tmp_path1).unwrap();
+        let written_path2 = write_rust_regression_snippet(&bundle, &tmp_path2).unwrap();
+
+        let content1 = fs::read_to_string(&written_path1).unwrap();
+        let content2 = fs::read_to_string(&written_path2).unwrap();
+
+        assert_eq!(content1, content2);
+
+        let _ = fs::remove_file(&written_path1);
+        let _ = fs::remove_file(&written_path2);
     }
 }

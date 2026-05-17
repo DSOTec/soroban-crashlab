@@ -1,455 +1,338 @@
-'use client';
+"use client";
 
-import * as React from 'react';
-import { useState, useMemo, useCallback } from 'react';
-import { FuzzingRun, RunArea, RunSeverity } from './types';
+import React, { useMemo } from "react";
+import { FuzzingRun } from "./types";
 
-interface ResourceFeeInsightPanelProps {
+export type ResourceFeeInsightDataState = "loading" | "error" | "success";
+
+interface ResourceFeeInsightProps {
   runs: FuzzingRun[];
-  className?: string;
+  dataState?: ResourceFeeInsightDataState;
+  onRetry?: () => void;
+  errorMessage?: string;
+  onRunClick?: (runId: string) => void;
 }
 
-interface ResourceFeeStats {
-  totalRuns: number;
-  averageFee: number;
-  minFee: number;
+export interface ResourceThresholds {
+  cpuWarning: number;
+  cpuCritical: number;
+  memoryWarning: number;
+  memoryCritical: number;
+  feeWarning: number;
+  feeCritical: number;
+}
+
+export interface ResourceMetrics {
+  avgCpu: number;
+  maxCpu: number;
+  avgMemory: number;
+  maxMemory: number;
+  avgFee: number;
   maxFee: number;
-  medianFee: number;
-  totalFees: number;
-  feeDistribution: {
-    low: number;
-    medium: number;
-    high: number;
-    critical: number;
-  };
-  areaBreakdown: {
-    [key in RunArea]: {
-      averageFee: number;
-      totalRuns: number;
-      totalFees: number;
-    };
-  };
-  severityBreakdown: {
-    [key in RunSeverity]: {
-      averageFee: number;
-      totalRuns: number;
-      totalFees: number;
-    };
-  };
-  trends: {
-    daily: Array<{ date: string; averageFee: number; runCount: number }>;
-    weekly: Array<{ week: string; averageFee: number; runCount: number }>;
-  };
+  expensiveRuns: FuzzingRun[];
+  totalRuns: number;
 }
 
-function calculateGroupStats(groupRuns: FuzzingRun[]) {
-  const fees = groupRuns.map(run => run.minResourceFee).filter(fee => fee > 0);
+const DEFAULT_THRESHOLDS: ResourceThresholds = {
+  cpuWarning: 1000000, // 1M instructions
+  cpuCritical: 5000000, // 5M instructions
+  memoryWarning: 1000000, // 1MB
+  memoryCritical: 10000000, // 10MB
+  feeWarning: 1000, // 1000 stroops
+  feeCritical: 5000, // 5000 stroops
+};
+
+export function computeResourceMetrics(runs: FuzzingRun[]): ResourceMetrics {
+  if (runs.length === 0) {
+    return {
+      avgCpu: 0,
+      maxCpu: 0,
+      avgMemory: 0,
+      maxMemory: 0,
+      avgFee: 0,
+      maxFee: 0,
+      expensiveRuns: [],
+      totalRuns: 0,
+    };
+  }
+
+  const totalCpu = runs.reduce((sum, run) => sum + run.cpuInstructions, 0);
+  const totalMemory = runs.reduce((sum, run) => sum + run.memoryBytes, 0);
+  const totalFee = runs.reduce((sum, run) => sum + run.minResourceFee, 0);
+
+  const avgCpu = Math.round(totalCpu / runs.length);
+  const maxCpu = Math.max(...runs.map(run => run.cpuInstructions));
+  const avgMemory = Math.round(totalMemory / runs.length);
+  const maxMemory = Math.max(...runs.map(run => run.memoryBytes));
+  const avgFee = Math.round(totalFee / runs.length);
+  const maxFee = Math.max(...runs.map(run => run.minResourceFee));
+
+  // Find runs that exceed critical thresholds
+  const expensiveRuns = runs.filter(run =>
+    run.cpuInstructions >= DEFAULT_THRESHOLDS.cpuCritical ||
+    run.memoryBytes >= DEFAULT_THRESHOLDS.memoryCritical ||
+    run.minResourceFee >= DEFAULT_THRESHOLDS.feeCritical
+  );
+
   return {
-    averageFee: fees.length > 0 ? fees.reduce((sum, fee) => sum + fee, 0) / fees.length : 0,
-    totalRuns: groupRuns.length,
-    totalFees: fees.reduce((sum, fee) => sum + fee, 0)
+    avgCpu,
+    maxCpu,
+    avgMemory,
+    maxMemory,
+    avgFee,
+    maxFee,
+    expensiveRuns,
+    totalRuns: runs.length,
   };
 }
 
-function getWeekString(date: Date) {
-  const year = date.getFullYear();
-  const week = Math.ceil((date.getTime() - new Date(year, 0, 1).getTime()) / (7 * 24 * 60 * 60 * 1000));
-  return `${year}-W${week.toString().padStart(2, '0')}`;
+function getResourceLevel(value: number, warning: number, critical: number): 'normal' | 'warning' | 'critical' {
+  if (value >= critical) return 'critical';
+  if (value >= warning) return 'warning';
+  return 'normal';
 }
 
-function calculateTrends(filteredRuns: FuzzingRun[]) {
-  const dailyData = new Map<string, { fees: number[]; count: number }>();
-  const weeklyData = new Map<string, { fees: number[]; count: number }>();
-
-  filteredRuns.forEach(run => {
-    const date = new Date(run.startedAt || run.queuedAt || '');
-    const dateStr = date.toISOString().split('T')[0];
-    const weekStr = getWeekString(date);
-
-    if (!dailyData.has(dateStr)) {
-      dailyData.set(dateStr, { fees: [], count: 0 });
-    }
-    if (!weeklyData.has(weekStr)) {
-      weeklyData.set(weekStr, { fees: [], count: 0 });
-    }
-
-    if (run.minResourceFee > 0) {
-      dailyData.get(dateStr)!.fees.push(run.minResourceFee);
-      weeklyData.get(weekStr)!.fees.push(run.minResourceFee);
-    }
-    dailyData.get(dateStr)!.count++;
-    weeklyData.get(weekStr)!.count++;
-  });
-
-  const daily = Array.from(dailyData.entries())
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .slice(-30)
-    .map(([date, data]) => ({
-      date,
-      averageFee: data.fees.length > 0 ? data.fees.reduce((sum, fee) => sum + fee, 0) / data.fees.length : 0,
-      runCount: data.count
-    }));
-
-  const weekly = Array.from(weeklyData.entries())
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .slice(-12)
-    .map(([week, data]) => ({
-      week,
-      averageFee: data.fees.length > 0 ? data.fees.reduce((sum, fee) => sum + fee, 0) / data.fees.length : 0,
-      runCount: data.count
-    }));
-
-  return { daily, weekly };
+function formatNumber(num: number): string {
+  if (num >= 1000000) {
+    return `${(num / 1000000).toFixed(1)}M`;
+  }
+  if (num >= 1000) {
+    return `${(num / 1000).toFixed(1)}K`;
+  }
+  return num.toString();
 }
 
-const ResourceFeeInsightPanel: React.FC<ResourceFeeInsightPanelProps> = ({
+export function ResourceFeeInsightPanel({
   runs,
-  className = '',
-}) => {
-  const [timeRange, setTimeRange] = useState<'7d' | '30d' | '90d' | 'all'>('30d');
-  const [viewMode, setViewMode] = useState<'overview' | 'trends' | 'breakdown'>('overview');
+  dataState = "success",
+  onRetry,
+  errorMessage,
+  onRunClick,
+}: ResourceFeeInsightProps) {
+  const metrics = useMemo(() => computeResourceMetrics(runs), [runs]);
 
-  const calculateGroupStats = (groupRuns: FuzzingRun[]) => {
-    const fees = groupRuns.map(run => run.minResourceFee).filter(fee => fee > 0);
-    return {
-      averageFee: fees.length > 0 ? fees.reduce((sum, fee) => sum + fee, 0) / fees.length : 0,
-      totalRuns: groupRuns.length,
-      totalFees: fees.reduce((sum, fee) => sum + fee, 0)
-    };
-  };
-
-  const getWeekString = (date: Date) => {
-    const year = date.getFullYear();
-    const week = Math.ceil((date.getTime() - new Date(year, 0, 1).getTime()) / (7 * 24 * 60 * 60 * 1000));
-    return `${year}-W${week.toString().padStart(2, '0')}`;
-  };
-
-  const calculateTrends = useCallback((filteredRuns: FuzzingRun[]) => {
-    const dailyData = new Map<string, { fees: number[]; count: number }>();
-    const weeklyData = new Map<string, { fees: number[]; count: number }>();
-
-    filteredRuns.forEach(run => {
-      const date = new Date(run.startedAt || run.queuedAt || '');
-      const dateStr = date.toISOString().split('T')[0];
-      const weekStr = getWeekString(date);
-
-      if (!dailyData.has(dateStr)) {
-        dailyData.set(dateStr, { fees: [], count: 0 });
-      }
-      if (!weeklyData.has(weekStr)) {
-        weeklyData.set(weekStr, { fees: [], count: 0 });
-      }
-
-      if (run.minResourceFee > 0) {
-        dailyData.get(dateStr)!.fees.push(run.minResourceFee);
-        weeklyData.get(weekStr)!.fees.push(run.minResourceFee);
-      }
-      dailyData.get(dateStr)!.count++;
-      weeklyData.get(weekStr)!.count++;
-    });
-
-    const daily = Array.from(dailyData.entries())
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .slice(-30)
-      .map(([date, data]) => ({
-        date,
-        averageFee: data.fees.length > 0 ? data.fees.reduce((sum, fee) => sum + fee, 0) / data.fees.length : 0,
-        runCount: data.count
-      }));
-
-    const weekly = Array.from(weeklyData.entries())
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .slice(-12)
-      .map(([week, data]) => ({
-        week,
-        averageFee: data.fees.length > 0 ? data.fees.reduce((sum, fee) => sum + fee, 0) / data.fees.length : 0,
-        runCount: data.count
-      }));
-
-    return { daily, weekly };
-  }, []);
-
-  const calculateStats = useCallback((): ResourceFeeStats => {
-    const filteredRuns = runs.filter(run => {
-      if (timeRange === 'all') return true;
-      const runDate = new Date(run.startedAt || run.queuedAt || '');
-      const now = new Date();
-      const daysDiff = (now.getTime() - runDate.getTime()) / (1000 * 60 * 60 * 24);
-      return daysDiff <= parseInt(timeRange.replace('d', ''));
-    });
-
-    const fees = filteredRuns.map(run => run.minResourceFee).filter(fee => fee > 0);
-    
-    if (fees.length === 0) {
-      return {
-        totalRuns: 0,
-        averageFee: 0,
-        minFee: 0,
-        maxFee: 0,
-        medianFee: 0,
-        totalFees: 0,
-        feeDistribution: { low: 0, medium: 0, high: 0, critical: 0 },
-        areaBreakdown: { auth: { averageFee: 0, totalRuns: 0, totalFees: 0 }, state: { averageFee: 0, totalRuns: 0, totalFees: 0 }, budget: { averageFee: 0, totalRuns: 0, totalFees: 0 }, xdr: { averageFee: 0, totalRuns: 0, totalFees: 0 } },
-        severityBreakdown: { low: { averageFee: 0, totalRuns: 0, totalFees: 0 }, medium: { averageFee: 0, totalRuns: 0, totalFees: 0 }, high: { averageFee: 0, totalRuns: 0, totalFees: 0 }, critical: { averageFee: 0, totalRuns: 0, totalFees: 0 } },
-        trends: { daily: [], weekly: [] }
-      };
-    }
-
-    const sortedFees = [...fees].sort((a, b) => a - b);
-    const medianFee = sortedFees.length % 2 === 0
-      ? (sortedFees[sortedFees.length / 2 - 1] + sortedFees[sortedFees.length / 2]) / 2
-      : sortedFees[Math.floor(sortedFees.length / 2)];
-
-    const feeThresholds = {
-      low: Math.min(...fees) + (sortedFees[Math.floor(fees.length * 0.25)] - Math.min(...fees)),
-      medium: sortedFees[Math.floor(fees.length * 0.5)],
-      high: sortedFees[Math.floor(fees.length * 0.75)]
-    };
-
-    const feeDistribution = {
-      low: fees.filter(fee => fee <= feeThresholds.low).length,
-      medium: fees.filter(fee => fee > feeThresholds.low && fee <= feeThresholds.medium).length,
-      high: fees.filter(fee => fee > feeThresholds.medium && fee <= feeThresholds.high).length,
-      critical: fees.filter(fee => fee > feeThresholds.high).length
-    };
-
-    const areaBreakdown = {
-      auth: calculateGroupStats(filteredRuns.filter(run => run.area === 'auth')),
-      state: calculateGroupStats(filteredRuns.filter(run => run.area === 'state')),
-      budget: calculateGroupStats(filteredRuns.filter(run => run.area === 'budget')),
-      xdr: calculateGroupStats(filteredRuns.filter(run => run.area === 'xdr'))
-    };
-
-    const severityBreakdown = {
-      low: calculateGroupStats(filteredRuns.filter(run => run.severity === 'low')),
-      medium: calculateGroupStats(filteredRuns.filter(run => run.severity === 'medium')),
-      high: calculateGroupStats(filteredRuns.filter(run => run.severity === 'high')),
-      critical: calculateGroupStats(filteredRuns.filter(run => run.severity === 'critical'))
-    };
-
-    const trends = calculateTrends(filteredRuns);
-
-    return {
-      totalRuns: filteredRuns.length,
-      averageFee: fees.reduce((sum, fee) => sum + fee, 0) / fees.length,
-      minFee: Math.min(...fees),
-      maxFee: Math.max(...fees),
-      medianFee,
-      totalFees: fees.reduce((sum, fee) => sum + fee, 0),
-      feeDistribution,
-      areaBreakdown,
-      severityBreakdown,
-      trends
-    };
-  }, [runs, timeRange, calculateTrends]);
-
-  const stats = useMemo(() => calculateStats(), [calculateStats]);
-
-  const formatFee = (fee: number) => {
-    return fee.toLocaleString('en-US', { maximumFractionDigits: 2 });
-  };
-
-  const getFeeColor = (fee: number, average: number) => {
-    if (fee < average * 0.5) return 'text-green-600';
-    if (fee < average * 1.5) return 'text-yellow-600';
-    return 'text-red-600';
-  };
-
-  const renderOverview = () => (
-    <div className="space-y-6">
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <div className="bg-white p-4 rounded-lg border border-gray-200">
-          <div className="text-sm text-gray-600 mb-1">Average Fee</div>
-          <div className="text-2xl font-bold text-gray-900">{formatFee(stats.averageFee)}</div>
-        </div>
-        <div className="bg-white p-4 rounded-lg border border-gray-200">
-          <div className="text-sm text-gray-600 mb-1">Median Fee</div>
-          <div className="text-2xl font-bold text-gray-900">{formatFee(stats.medianFee)}</div>
-        </div>
-        <div className="bg-white p-4 rounded-lg border border-gray-200">
-          <div className="text-sm text-gray-600 mb-1">Min/Max</div>
-          <div className="text-lg font-bold text-gray-900">
-            {formatFee(stats.minFee)} / {formatFee(stats.maxFee)}
-          </div>
-        </div>
-        <div className="bg-white p-4 rounded-lg border border-gray-200">
-          <div className="text-sm text-gray-600 mb-1">Total Fees</div>
-          <div className="text-2xl font-bold text-gray-900">{formatFee(stats.totalFees)}</div>
-        </div>
-      </div>
-
-      <div className="bg-white p-4 rounded-lg border border-gray-200">
-        <h4 className="text-sm font-semibold text-gray-900 mb-3">Fee Distribution</h4>
-        <div className="space-y-2">
-          {Object.entries(stats.feeDistribution).map(([level, count]) => {
-            const percentage = stats.totalRuns > 0 ? (count / stats.totalRuns) * 100 : 0;
-            const colors = {
-              low: 'bg-green-500',
-              medium: 'bg-yellow-500',
-              high: 'bg-orange-500',
-              critical: 'bg-red-500'
-            };
-            return (
-              <div key={level} className="flex items-center gap-3">
-                <div className="w-16 text-sm font-medium capitalize">{level}</div>
-                <div className="flex-1 bg-gray-200 rounded-full h-6 relative">
-                  <div
-                    className={`h-6 rounded-full ${colors[level as keyof typeof colors]}`}
-                    style={{ width: `${percentage}%` }}
-                  />
-                </div>
-                <div className="w-20 text-sm text-right">{count} runs</div>
-                <div className="w-12 text-sm text-right">{percentage.toFixed(1)}%</div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </div>
-  );
-
-  const renderTrends = () => (
-    <div className="space-y-6">
-      <div className="bg-white p-4 rounded-lg border border-gray-200">
-        <h4 className="text-sm font-semibold text-gray-900 mb-3">Daily Trends (Last 30 days)</h4>
-        <div className="h-64 flex items-end justify-between gap-1">
-          {stats.trends.daily.map((day) => {
-            const maxFee = Math.max(...stats.trends.daily.map(d => d.averageFee));
-            const height = maxFee > 0 ? (day.averageFee / maxFee) * 100 : 0;
-            return (
-              <div key={day.date} className="flex-1 flex flex-col items-center">
-                <div
-                  className="w-full bg-blue-500 rounded-t"
-                  style={{ height: `${height}%`, minHeight: height > 0 ? '2px' : '0' }}
-                  title={`${day.date}: ${formatFee(day.averageFee)} (${day.runCount} runs)`}
-                />
-                <div className="text-xs text-gray-500 mt-1 rotate-45 origin-left">
-                  {new Date(day.date).getDate()}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      <div className="bg-white p-4 rounded-lg border border-gray-200">
-        <h4 className="text-sm font-semibold text-gray-900 mb-3">Weekly Trends (Last 12 weeks)</h4>
-        <div className="space-y-2">
-          {stats.trends.weekly.map(week => (
-            <div key={week.week} className="flex items-center gap-3">
-              <div className="w-20 text-sm">{week.week}</div>
-              <div className="flex-1 bg-gray-200 rounded-full h-4 relative">
-                <div
-                  className="h-4 bg-blue-500 rounded-full"
-                  style={{
-                    width: `${Math.max((week.averageFee / Math.max(...stats.trends.weekly.map(w => w.averageFee))) * 100, 2)}%`
-                  }}
-                />
-              </div>
-              <div className="w-24 text-sm text-right">{formatFee(week.averageFee)}</div>
-              <div className="w-12 text-sm text-gray-500">{week.runCount}</div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-
-  const renderBreakdown = () => (
-    <div className="space-y-6">
-      <div className="bg-white p-4 rounded-lg border border-gray-200">
-        <h4 className="text-sm font-semibold text-gray-900 mb-3">By Area</h4>
-        <div className="space-y-3">
-          {Object.entries(stats.areaBreakdown).map(([area, data]) => (
-            <div key={area} className="flex items-center justify-between p-3 bg-gray-50 rounded">
-              <div>
-                <div className="font-medium capitalize">{area}</div>
-                <div className="text-sm text-gray-600">{data.totalRuns} runs</div>
-              </div>
-              <div className="text-right">
-                <div className={`font-semibold ${getFeeColor(data.averageFee, stats.averageFee)}`}>
-                  {formatFee(data.averageFee)}
-                </div>
-                <div className="text-sm text-gray-600">avg fee</div>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <div className="bg-white p-4 rounded-lg border border-gray-200">
-        <h4 className="text-sm font-semibold text-gray-900 mb-3">By Severity</h4>
-        <div className="space-y-3">
-          {Object.entries(stats.severityBreakdown).map(([severity, data]) => (
-            <div key={severity} className="flex items-center justify-between p-3 bg-gray-50 rounded">
-              <div>
-                <div className="font-medium capitalize">{severity}</div>
-                <div className="text-sm text-gray-600">{data.totalRuns} runs</div>
-              </div>
-              <div className="text-right">
-                <div className={`font-semibold ${getFeeColor(data.averageFee, stats.averageFee)}`}>
-                  {formatFee(data.averageFee)}
-                </div>
-                <div className="text-sm text-gray-600">avg fee</div>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-
-  if (stats.totalRuns === 0) {
+  if (dataState === "loading") {
     return (
-      <div className={`bg-white rounded-lg border border-gray-200 p-6 ${className}`}>
-        <div className="text-center text-gray-500">
-          <div className="text-lg font-medium mb-2">No Resource Fee Data</div>
-          <div className="text-sm">No runs with resource fee information found in the selected time range.</div>
+      <section
+        className="w-full space-y-4 rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-950"
+        aria-busy="true"
+        aria-label="Resource Fee Insight loading"
+      >
+        <div className="h-8 w-64 animate-pulse rounded-md bg-zinc-200 dark:bg-zinc-800" />
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          {Array.from({ length: 3 }).map((_, index) => (
+            <div
+              key={index}
+              className="h-32 animate-pulse rounded-xl border border-zinc-200 bg-zinc-100/60 dark:border-zinc-800 dark:bg-zinc-900/30"
+            />
+          ))}
         </div>
-      </div>
+      </section>
     );
   }
 
-  return (
-    <div className={`bg-white rounded-lg border border-gray-200 p-6 ${className}`}>
-      <div className="flex items-center justify-between mb-6">
-        <h3 className="text-lg font-semibold text-gray-900">Resource Fee Insights</h3>
-        <div className="flex items-center gap-2">
-          <select
-            value={timeRange}
-            onChange={(e) => setTimeRange(e.target.value as '7d' | '30d' | '90d' | 'all')}
-            className="px-3 py-1 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+  if (dataState === "error") {
+    return (
+      <section className="w-full rounded-2xl border border-red-200 bg-red-50/60 p-6 shadow-sm dark:border-red-900/50 dark:bg-red-950/20">
+        <h2 className="text-xl font-bold text-red-900 dark:text-red-100">
+          Resource Fee Insight
+        </h2>
+        <p className="mt-2 text-sm text-red-700 dark:text-red-300">
+          {errorMessage ??
+            "Resource metrics are unavailable. Retry to refresh resource diagnostics."}
+        </p>
+        {onRetry && (
+          <button
+            type="button"
+            onClick={onRetry}
+            className="mt-4 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
           >
-            <option value="7d">Last 7 days</option>
-            <option value="30d">Last 30 days</option>
-            <option value="90d">Last 90 days</option>
-            <option value="all">All time</option>
-          </select>
-          <div className="flex bg-gray-100 rounded-md p-1">
-            {(['overview', 'trends', 'breakdown'] as const).map(mode => (
-              <button
-                key={mode}
-                onClick={() => setViewMode(mode)}
-                className={`px-3 py-1 rounded text-sm font-medium transition-colors ${
-                  viewMode === mode
-                    ? 'bg-white text-blue-600 shadow-sm'
-                    : 'text-gray-600 hover:text-gray-900'
-                }`}
-              >
-                {mode.charAt(0).toUpperCase() + mode.slice(1)}
-              </button>
-            ))}
+            Retry resource insight
+          </button>
+        )}
+      </section>
+    );
+  }
+
+  const cpuLevel = getResourceLevel(metrics.maxCpu, DEFAULT_THRESHOLDS.cpuWarning, DEFAULT_THRESHOLDS.cpuCritical);
+  const memoryLevel = getResourceLevel(metrics.maxMemory, DEFAULT_THRESHOLDS.memoryWarning, DEFAULT_THRESHOLDS.memoryCritical);
+  const feeLevel = getResourceLevel(metrics.maxFee, DEFAULT_THRESHOLDS.feeWarning, DEFAULT_THRESHOLDS.feeCritical);
+
+  const getLevelStyles = (level: 'normal' | 'warning' | 'critical') => {
+    switch (level) {
+      case 'critical':
+        return {
+          bg: 'bg-red-50 dark:bg-red-950/20',
+          border: 'border-red-200 dark:border-red-900/50',
+          text: 'text-red-900 dark:text-red-100',
+          icon: 'text-red-600 dark:text-red-400',
+        };
+      case 'warning':
+        return {
+          bg: 'bg-amber-50 dark:bg-amber-950/20',
+          border: 'border-amber-200 dark:border-amber-900/50',
+          text: 'text-amber-900 dark:text-amber-100',
+          icon: 'text-amber-600 dark:text-amber-400',
+        };
+      default:
+        return {
+          bg: 'bg-emerald-50 dark:bg-emerald-950/20',
+          border: 'border-emerald-200 dark:border-emerald-900/50',
+          text: 'text-emerald-900 dark:text-emerald-100',
+          icon: 'text-emerald-600 dark:text-emerald-400',
+        };
+    }
+  };
+
+  return (
+    <section className="w-full space-y-6 rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
+      <div className="flex items-center justify-between">
+        <h2 className="text-xl font-bold text-zinc-900 dark:text-zinc-100">
+          Resource Fee Insight
+        </h2>
+        {metrics.expensiveRuns.length > 0 && (
+          <span className="rounded-full bg-red-100 px-3 py-1 text-sm font-medium text-red-800 dark:bg-red-900/30 dark:text-red-200">
+            {metrics.expensiveRuns.length} expensive run{metrics.expensiveRuns.length !== 1 ? 's' : ''}
+          </span>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+        {/* CPU Instructions */}
+        <div className={`rounded-xl border p-4 ${getLevelStyles(cpuLevel).bg} ${getLevelStyles(cpuLevel).border}`}>
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+              CPU Instructions
+            </h3>
+            <div className={`p-1.5 rounded-lg ${getLevelStyles(cpuLevel).icon}`}>
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
+              </svg>
+            </div>
+          </div>
+          <div className="space-y-1">
+            <p className={`text-2xl font-bold ${getLevelStyles(cpuLevel).text}`}>
+              {formatNumber(metrics.maxCpu)}
+            </p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              Avg: {formatNumber(metrics.avgCpu)} • Max: {formatNumber(metrics.maxCpu)}
+            </p>
+          </div>
+        </div>
+
+        {/* Memory Usage */}
+        <div className={`rounded-xl border p-4 ${getLevelStyles(memoryLevel).bg} ${getLevelStyles(memoryLevel).border}`}>
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+              Memory Usage
+            </h3>
+            <div className={`p-1.5 rounded-lg ${getLevelStyles(memoryLevel).icon}`}>
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" />
+              </svg>
+            </div>
+          </div>
+          <div className="space-y-1">
+            <p className={`text-2xl font-bold ${getLevelStyles(memoryLevel).text}`}>
+              {formatNumber(metrics.maxMemory)}B
+            </p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              Avg: {formatNumber(metrics.avgMemory)}B • Max: {formatNumber(metrics.maxMemory)}B
+            </p>
+          </div>
+        </div>
+
+        {/* Resource Fee */}
+        <div className={`rounded-xl border p-4 ${getLevelStyles(feeLevel).bg} ${getLevelStyles(feeLevel).border}`}>
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+              Min Resource Fee
+            </h3>
+            <div className={`p-1.5 rounded-lg ${getLevelStyles(feeLevel).icon}`}>
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1" />
+              </svg>
+            </div>
+          </div>
+          <div className="space-y-1">
+            <p className={`text-2xl font-bold ${getLevelStyles(feeLevel).text}`}>
+              {metrics.maxFee.toLocaleString()}
+            </p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              Avg: {metrics.avgFee.toLocaleString()} • Max: {metrics.maxFee.toLocaleString()} stroops
+            </p>
           </div>
         </div>
       </div>
 
-      <div>
-        {viewMode === 'overview' && renderOverview()}
-        {viewMode === 'trends' && renderTrends()}
-        {viewMode === 'breakdown' && renderBreakdown()}
-      </div>
-    </div>
-  );
-};
+      {/* Expensive Runs List */}
+      {metrics.expensiveRuns.length > 0 && (
+        <div className="rounded-xl border border-red-200 bg-red-50/60 p-4 dark:border-red-900/50 dark:bg-red-950/20">
+          <h3 className="text-sm font-semibold text-red-900 dark:text-red-100 mb-3">
+            Expensive Runs Requiring Attention
+          </h3>
+          <div className="space-y-2">
+            {metrics.expensiveRuns.slice(0, 5).map((run) => (
+              <div
+                key={run.id}
+                className="flex items-center justify-between rounded-lg bg-white/60 p-3 dark:bg-zinc-900/30"
+              >
+                <div className="flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                      Run {run.id}
+                    </span>
+                    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                      run.status === 'failed' ? 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-200' :
+                      run.status === 'running' ? 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-200' :
+                      'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200'
+                    }`}>
+                      {run.status}
+                    </span>
+                  </div>
+                  <div className="mt-1 flex gap-4 text-xs text-zinc-500 dark:text-zinc-400">
+                    <span>CPU: {formatNumber(run.cpuInstructions)}</span>
+                    <span>Mem: {formatNumber(run.memoryBytes)}B</span>
+                    <span>Fee: {run.minResourceFee.toLocaleString()}</span>
+                  </div>
+                </div>
+                {onRunClick && (
+                  <button
+                    type="button"
+                    onClick={() => onRunClick(run.id)}
+                    className="rounded-lg bg-red-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+                  >
+                    View Details
+                  </button>
+                )}
+              </div>
+            ))}
+            {metrics.expensiveRuns.length > 5 && (
+              <p className="text-xs text-zinc-500 dark:text-zinc-400 text-center">
+                And {metrics.expensiveRuns.length - 5} more expensive runs...
+              </p>
+            )}
+          </div>
+        </div>
+      )}
 
-export default ResourceFeeInsightPanel;
+      {/* Threshold Information */}
+      <div className="rounded-lg bg-zinc-50 p-4 dark:bg-zinc-900/30">
+        <h4 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 mb-2">
+          Threshold Levels
+        </h4>
+        <div className="grid grid-cols-1 gap-2 text-xs text-zinc-600 dark:text-zinc-400 md:grid-cols-3">
+          <div>
+            <span className="font-medium">CPU:</span> Warning ≥{formatNumber(DEFAULT_THRESHOLDS.cpuWarning)}, Critical ≥{formatNumber(DEFAULT_THRESHOLDS.cpuCritical)}
+          </div>
+          <div>
+            <span className="font-medium">Memory:</span> Warning ≥{formatNumber(DEFAULT_THRESHOLDS.memoryWarning)}B, Critical ≥{formatNumber(DEFAULT_THRESHOLDS.memoryCritical)}B
+          </div>
+          <div>
+            <span className="font-medium">Fee:</span> Warning ≥{DEFAULT_THRESHOLDS.feeWarning.toLocaleString()}, Critical ≥{DEFAULT_THRESHOLDS.feeCritical.toLocaleString()} stroops
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}

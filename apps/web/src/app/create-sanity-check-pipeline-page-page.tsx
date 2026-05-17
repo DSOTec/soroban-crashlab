@@ -1,33 +1,14 @@
 'use client';
 
-import React, { useState, useCallback } from 'react';
-
-export type PipelineStatus = 'idle' | 'running' | 'passed' | 'failed' | 'warning';
-export type CheckCategory = 'contract' | 'environment' | 'dependencies' | 'configuration';
-
-export interface SanityCheck {
-  id: string;
-  name: string;
-  description: string;
-  category: CheckCategory;
-  status: PipelineStatus;
-  duration: number;
-  lastRun?: Date;
-  errorMessage?: string;
-  warningMessage?: string;
-  enabled: boolean;
-}
-
-export interface PipelineRun {
-  id: string;
-  startedAt: Date;
-  finishedAt?: Date;
-  status: PipelineStatus;
-  totalChecks: number;
-  passedChecks: number;
-  failedChecks: number;
-  warningChecks: number;
-}
+import React, { useState, useCallback, useEffect } from 'react';
+import { 
+  SanityCheck, 
+  PipelineRun, 
+  PipelineStatus, 
+  CheckCategory,
+  toggleSanityCheck,
+  createNewPipelineRun 
+} from './sanity-check-utils';
 
 interface SanityCheckPipelinePageProps {
   className?: string;
@@ -152,26 +133,62 @@ const MOCK_PIPELINE_RUNS: PipelineRun[] = [
 ];
 
 export default function SanityCheckPipelinePage({ className = '' }: SanityCheckPipelinePageProps) {
-  const [checks, setChecks] = useState<SanityCheck[]>(MOCK_SANITY_CHECKS);
-  const [pipelineRuns, setPipelineRuns] = useState<PipelineRun[]>(MOCK_PIPELINE_RUNS);
+  const [checks, setChecks] = useState<SanityCheck[]>([]);
+  const [pipelineRuns, setPipelineRuns] = useState<PipelineRun[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
+  
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [isRunning, setIsRunning] = useState(false);
 
-  const toggleCheck = useCallback((id: string) => {
-    setChecks(prev =>
-      prev.map(check =>
-        check.id === id ? { ...check, enabled: !check.enabled } : check
-      )
-    );
+  useEffect(() => {
+    let isMounted = true;
+    const fetchPipelineData = async () => {
+      try {
+        await new Promise(resolve => setTimeout(resolve, 800));
+        if (isMounted) {
+          setChecks(MOCK_SANITY_CHECKS);
+          setPipelineRuns(MOCK_PIPELINE_RUNS);
+          setIsLoading(false);
+        }
+      } catch {
+        if (isMounted) {
+          setError('Failed to load sanity check pipeline data.');
+          setIsLoading(false);
+        }
+      }
+    };
+    fetchPipelineData();
+    return () => { isMounted = false; };
   }, []);
 
-  const runPipeline = useCallback(() => {
-    setIsRunning(true);
-    console.log('Running sanity check pipeline...');
-    setTimeout(() => {
-      setIsRunning(false);
-    }, 3000);
+  const toggleCheck = useCallback((id: string) => {
+    setChecks(prev => toggleSanityCheck(prev, id));
   }, []);
+
+  const runPipeline = useCallback(async () => {
+    setIsRunning(true);
+    setError(null);
+    try {
+      await new Promise((resolve, reject) => {
+        setTimeout(() => {
+          if (Math.random() < 0.05) reject(new Error('Network error'));
+          else resolve(null);
+        }, 2000);
+      });
+      
+      const now = new Date();
+      const startedAt = new Date(now.getTime() - 2000);
+      const newRun = createNewPipelineRun(checks, `run-${Date.now()}`, startedAt, now);
+      
+      setPipelineRuns(prev => [newRun, ...prev].slice(0, 10));
+      
+    } catch {
+      setError('Failed to run the pipeline. Please try again.');
+    } finally {
+      setIsRunning(false);
+    }
+  }, [checks]);
 
   const filteredChecks = checks.filter(check =>
     selectedCategory === 'all' || check.category === selectedCategory
@@ -223,8 +240,34 @@ export default function SanityCheckPipelinePage({ className = '' }: SanityCheckP
     return 'Just now';
   };
 
+  if (isLoading) {
+    return (
+      <div className={`w-full ${className}`}>
+        <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl overflow-hidden shadow-sm animate-pulse">
+          <div className="p-8 border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-900/30">
+            <div className="h-8 w-8 rounded-lg bg-zinc-200 dark:bg-zinc-700 mb-2"></div>
+            <div className="h-6 w-48 bg-zinc-200 dark:bg-zinc-700 rounded mb-2"></div>
+            <div className="h-4 w-96 bg-zinc-200 dark:bg-zinc-700 rounded"></div>
+          </div>
+          <div className="p-8">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+              {[1, 2, 3, 4].map(i => (
+                <div key={i} className="bg-zinc-100 dark:bg-zinc-800 h-24 rounded-xl"></div>
+              ))}
+            </div>
+            <div className="space-y-4">
+              {[1, 2, 3].map(i => (
+                <div key={i} className="h-24 bg-zinc-100 dark:bg-zinc-800 rounded-xl"></div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   const currentRun = pipelineRuns[0];
-  const passRate = currentRun ? Math.round((currentRun.passedChecks / currentRun.totalChecks) * 100) : 0;
+  const passRate = currentRun && currentRun.totalChecks > 0 ? Math.round((currentRun.passedChecks / currentRun.totalChecks) * 100) : 0;
 
   return (
     <div className={`w-full ${className}`}>
@@ -234,7 +277,7 @@ export default function SanityCheckPipelinePage({ className = '' }: SanityCheckP
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="h-10 w-10 rounded-xl bg-emerald-600 dark:bg-emerald-500 flex items-center justify-center text-white">
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
               </div>
@@ -248,14 +291,14 @@ export default function SanityCheckPipelinePage({ className = '' }: SanityCheckP
             
             <button
               onClick={runPipeline}
-              disabled={isRunning}
+              disabled={isRunning || checks.filter(c => c.enabled).length === 0}
               className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors ${
-                isRunning
+                (isRunning || checks.filter(c => c.enabled).length === 0)
                   ? 'bg-zinc-300 dark:bg-zinc-700 text-zinc-500 cursor-not-allowed'
                   : 'bg-emerald-600 hover:bg-emerald-700 text-white'
               }`}
             >
-              <svg className={`w-4 h-4 ${isRunning ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className={`w-4 h-4 ${isRunning ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
               </svg>
               {isRunning ? 'Running...' : 'Run Pipeline'}
@@ -263,59 +306,75 @@ export default function SanityCheckPipelinePage({ className = '' }: SanityCheckP
           </div>
         </div>
 
+        {error && (
+          <div className="mx-8 mt-8 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-900/50 rounded-lg text-red-700 dark:text-red-400 text-sm font-medium flex items-center gap-2" role="alert">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            {error}
+          </div>
+        )}
+
         {/* Pipeline Status Summary */}
-        <div className="p-8 border-b border-zinc-200 dark:border-zinc-800">
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-            <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-xl p-4">
-              <div className="text-sm text-zinc-500 dark:text-zinc-400 mb-1">Last Run</div>
-              <div className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">
-                {formatTimestamp(currentRun.startedAt)}
+        {currentRun ? (
+          <div className="p-8 border-b border-zinc-200 dark:border-zinc-800">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+              <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-xl p-4">
+                <div className="text-sm text-zinc-500 dark:text-zinc-400 mb-1">Last Run</div>
+                <div className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">
+                  {formatTimestamp(currentRun.startedAt)}
+                </div>
+                <div className={`inline-flex items-center gap-1 mt-2 px-2 py-1 text-xs font-medium rounded-full ${getStatusColor(currentRun.status)}`}>
+                  {getStatusIcon(currentRun.status)} {currentRun.status.toUpperCase()}
+                </div>
               </div>
-              <div className={`inline-flex items-center gap-1 mt-2 px-2 py-1 text-xs font-medium rounded-full ${getStatusColor(currentRun.status)}`}>
-                {getStatusIcon(currentRun.status)} {currentRun.status.toUpperCase()}
+              
+              <div className="bg-green-50 dark:bg-green-900/20 rounded-xl p-4">
+                <div className="text-sm text-green-600 dark:text-green-400 mb-1">Passed</div>
+                <div className="text-2xl font-bold text-green-700 dark:text-green-300">
+                  {currentRun.passedChecks}/{currentRun.totalChecks}
+                </div>
+                <div className="text-xs text-green-600 dark:text-green-400 mt-2">
+                  {passRate}% success rate
+                </div>
               </div>
-            </div>
-            
-            <div className="bg-green-50 dark:bg-green-900/20 rounded-xl p-4">
-              <div className="text-sm text-green-600 dark:text-green-400 mb-1">Passed</div>
-              <div className="text-2xl font-bold text-green-700 dark:text-green-300">
-                {currentRun.passedChecks}/{currentRun.totalChecks}
+              
+              <div className="bg-red-50 dark:bg-red-900/20 rounded-xl p-4">
+                <div className="text-sm text-red-600 dark:text-red-400 mb-1">Failed</div>
+                <div className="text-2xl font-bold text-red-700 dark:text-red-300">
+                  {currentRun.failedChecks}
+                </div>
+                <div className="text-xs text-red-600 dark:text-red-400 mt-2">
+                  {currentRun.failedChecks > 0 ? 'Requires attention' : 'No failures'}
+                </div>
               </div>
-              <div className="text-xs text-green-600 dark:text-green-400 mt-2">
-                {passRate}% success rate
-              </div>
-            </div>
-            
-            <div className="bg-red-50 dark:bg-red-900/20 rounded-xl p-4">
-              <div className="text-sm text-red-600 dark:text-red-400 mb-1">Failed</div>
-              <div className="text-2xl font-bold text-red-700 dark:text-red-300">
-                {currentRun.failedChecks}
-              </div>
-              <div className="text-xs text-red-600 dark:text-red-400 mt-2">
-                {currentRun.failedChecks > 0 ? 'Requires attention' : 'No failures'}
-              </div>
-            </div>
-            
-            <div className="bg-amber-50 dark:bg-amber-900/20 rounded-xl p-4">
-              <div className="text-sm text-amber-600 dark:text-amber-400 mb-1">Warnings</div>
-              <div className="text-2xl font-bold text-amber-700 dark:text-amber-300">
-                {currentRun.warningChecks}
-              </div>
-              <div className="text-xs text-amber-600 dark:text-amber-400 mt-2">
-                {currentRun.warningChecks > 0 ? 'Review recommended' : 'All clear'}
+              
+              <div className="bg-amber-50 dark:bg-amber-900/20 rounded-xl p-4">
+                <div className="text-sm text-amber-600 dark:text-amber-400 mb-1">Warnings</div>
+                <div className="text-2xl font-bold text-amber-700 dark:text-amber-300">
+                  {currentRun.warningChecks}
+                </div>
+                <div className="text-xs text-amber-600 dark:text-amber-400 mt-2">
+                  {currentRun.warningChecks > 0 ? 'Review recommended' : 'All clear'}
+                </div>
               </div>
             </div>
           </div>
-        </div>
+        ) : (
+          <div className="p-8 border-b border-zinc-200 dark:border-zinc-800">
+            <p className="text-sm text-zinc-500">No pipeline runs available.</p>
+          </div>
+        )}
 
         {/* Filters */}
         <div className="px-8 py-4 border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50/30 dark:bg-zinc-900/20">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
-              <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+              <label htmlFor="category-select" className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
                 Category:
               </label>
               <select
+                id="category-select"
                 value={selectedCategory}
                 onChange={(e) => setSelectedCategory(e.target.value)}
                 className="px-3 py-1.5 text-sm bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
@@ -363,7 +422,7 @@ export default function SanityCheckPipelinePage({ className = '' }: SanityCheckP
                     {check.errorMessage && (
                       <div className="mb-3 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
                         <div className="flex items-start gap-2">
-                          <span className="text-red-600 dark:text-red-400">✗</span>
+                          <span className="text-red-600 dark:text-red-400" aria-hidden="true">✗</span>
                           <span className="text-sm text-red-700 dark:text-red-300">{check.errorMessage}</span>
                         </div>
                       </div>
@@ -372,7 +431,7 @@ export default function SanityCheckPipelinePage({ className = '' }: SanityCheckP
                     {check.warningMessage && (
                       <div className="mb-3 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg">
                         <div className="flex items-start gap-2">
-                          <span className="text-amber-600 dark:text-amber-400">⚠</span>
+                          <span className="text-amber-600 dark:text-amber-400" aria-hidden="true">⚠</span>
                           <span className="text-sm text-amber-700 dark:text-amber-300">{check.warningMessage}</span>
                         </div>
                       </div>
@@ -395,21 +454,12 @@ export default function SanityCheckPipelinePage({ className = '' }: SanityCheckP
                   
                   <div className="flex items-center gap-3">
                     <button
-                      onClick={() => console.log('View details:', check.id)}
-                      className="p-2 text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors"
-                      title="View details"
-                    >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                      </svg>
-                    </button>
-                    
-                    <button
                       onClick={() => toggleCheck(check.id)}
                       className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2 dark:focus:ring-offset-zinc-900 ${
                         check.enabled ? 'bg-emerald-600' : 'bg-zinc-200 dark:bg-zinc-700'
                       }`}
                       aria-pressed={check.enabled}
+                      aria-label={`Toggle ${check.name} check`}
                     >
                       <span
                         className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
@@ -431,7 +481,7 @@ export default function SanityCheckPipelinePage({ className = '' }: SanityCheckP
             {pipelineRuns.map((run) => (
               <div
                 key={run.id}
-                className="flex items-center justify-between p-4 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-lg"
+                className="flex flex-col sm:flex-row sm:items-center justify-between p-4 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-lg gap-4 sm:gap-0"
               >
                 <div className="flex items-center gap-4">
                   <span className={`px-3 py-1 text-xs font-medium rounded-full ${getStatusColor(run.status)}`}>
@@ -447,21 +497,24 @@ export default function SanityCheckPipelinePage({ className = '' }: SanityCheckP
                 
                 <div className="flex items-center gap-6 text-sm">
                   <div className="text-green-600 dark:text-green-400">
-                    ✓ {run.passedChecks} passed
+                    <span aria-hidden="true">✓</span> {run.passedChecks} passed
                   </div>
                   {run.failedChecks > 0 && (
                     <div className="text-red-600 dark:text-red-400">
-                      ✗ {run.failedChecks} failed
+                      <span aria-hidden="true">✗</span> {run.failedChecks} failed
                     </div>
                   )}
                   {run.warningChecks > 0 && (
                     <div className="text-amber-600 dark:text-amber-400">
-                      ⚠ {run.warningChecks} warnings
+                      <span aria-hidden="true">⚠</span> {run.warningChecks} warnings
                     </div>
                   )}
                 </div>
               </div>
             ))}
+            {pipelineRuns.length === 0 && (
+              <p className="text-sm text-zinc-500">No recent runs available.</p>
+            )}
           </div>
         </div>
       </div>

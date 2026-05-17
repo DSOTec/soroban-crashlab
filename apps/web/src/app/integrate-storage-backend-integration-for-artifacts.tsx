@@ -20,83 +20,72 @@ export type Artifact = {
   url?: string;
 };
 
-// --- API Client Layer (Mocked) ---
+// --- API Client Layer (Real Implementation) ---
 
 /**
- * Simulates uploading an artifact to the backend.
+ * Uploads an artifact to the backend storage.
  * POST /api/artifacts
  */
 async function uploadArtifact(file: File): Promise<Artifact> {
-  // TODO: Replace with real fetch call when backend is available
-  console.log('Uploading file:', file.name);
-  
-  // Simulate network delay
-  await new Promise(resolve => setTimeout(resolve, 1500));
-  
-  // In a real implementation, the backend would return the metadata
-  const newArtifact: Artifact = {
-    id: `art-${Math.random().toString(36).substring(2, 9)}`,
-    name: file.name,
-    createdAt: new Date().toISOString(),
-    sizeBytes: file.size,
-    mimeType: file.type || 'application/octet-stream',
-    // In a real app, this would be a signed URL or direct storage link
-    url: URL.createObjectURL(file), 
+  const formData = new FormData();
+  formData.append('file', file);
+
+  const response = await fetch('/api/artifacts', {
+    method: 'POST',
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || 'Failed to upload artifact');
+  }
+
+  const data = await response.json();
+  return {
+    id: data.id,
+    name: data.name,
+    createdAt: data.createdAt,
+    sizeBytes: data.sizeBytes,
+    mimeType: 'application/octet-stream',
   };
-  
-  return newArtifact;
 }
 
 /**
- * Simulates fetching the list of artifacts from the backend.
+ * Fetches the list of artifacts from the backend storage.
  * GET /api/artifacts
  */
 async function fetchArtifacts(): Promise<Artifact[]> {
-  // TODO: Replace with real fetch call when backend is available
-  
-  // Simulate network delay
-  await new Promise(resolve => setTimeout(resolve, 1000));
-  
-  // Mock data representing previously uploaded artifacts
-  return [
-    {
-      id: 'art-101',
-      name: 'run-942-crash-bundle.json',
-      createdAt: new Date(Date.now() - 172800000).toISOString(), // 2 days ago
-      sizeBytes: 15420,
-      mimeType: 'application/json',
-    },
-    {
-      id: 'art-102',
-      name: 'soroban-auth-trace-v1.bin',
-      createdAt: new Date(Date.now() - 3600000).toISOString(), // 1 hour ago
-      sizeBytes: 892100,
-      mimeType: 'application/octet-stream',
-    }
-  ];
+  const response = await fetch('/api/artifacts', {
+    method: 'GET',
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || 'Failed to list artifacts');
+  }
+
+  const data = await response.json();
+  return data.artifacts || [];
 }
 
 /**
- * Simulates downloading artifact content from the backend.
+ * Downloads artifact content from the backend storage.
  * GET /api/artifacts/:id
  */
 async function downloadArtifactContent(id: string): Promise<Blob> {
-  // TODO: Replace with real fetch call when backend is available
-  console.log('Downloading artifact content for ID:', id);
-  
-  // Simulate network delay
-  await new Promise(resolve => setTimeout(resolve, 800));
-  
-  // Return a dummy JSON blob for demonstration
-  const dummyData = { 
-    id, 
-    source: 'Soroban CrashLab Storage Backend',
-    timestamp: new Date().toISOString(),
-    content: 'This is a mock artifact payload retrieved from the storage backend.' 
-  };
-  
-  return new Blob([JSON.stringify(dummyData, null, 2)], { type: 'application/json' });
+  const response = await fetch(`/api/artifacts/${id}`, {
+    method: 'GET',
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || 'Failed to download artifact');
+  }
+
+  return await response.blob();
 }
+
 
 // --- Helper Functions ---
 

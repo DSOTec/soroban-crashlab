@@ -85,7 +85,14 @@ impl StaleRunDetector {
     /// Returns [`StaleStatus::Stale`] when no progress has been recorded within
     /// the configured threshold, otherwise [`StaleStatus::Ok`].
     pub fn check(&self) -> StaleStatus {
-        let elapsed = self.last_progress.elapsed();
+        self.check_with_elapsed(self.last_progress.elapsed())
+    }
+
+    /// Evaluates staleness for an explicit elapsed duration.
+    ///
+    /// This keeps tests reproducible without relying on thread sleeps and lets
+    /// callers verify retention/health behavior deterministically.
+    pub fn check_with_elapsed(&self, elapsed: Duration) -> StaleStatus {
         let threshold = Duration::from_millis(self.config.stale_threshold_ms);
 
         if elapsed >= threshold {
@@ -137,11 +144,9 @@ mod tests {
 
     #[test]
     fn detector_marks_stale_after_threshold() {
-        // Use a very short threshold so the test doesn't need to sleep long.
         let cfg = StaleDetectorConfig::new(50);
         let detector = StaleRunDetector::new(cfg);
-        thread::sleep(StdDuration::from_millis(100));
-        match detector.check() {
+        match detector.check_with_elapsed(StdDuration::from_millis(100)) {
             StaleStatus::Stale { stale_ms, hint } => {
                 assert!(stale_ms >= 50, "expected stale_ms >= 50, got {stale_ms}");
                 assert!(!hint.is_empty());
@@ -165,8 +170,10 @@ mod tests {
         let cfg = StaleDetectorConfig::new(50);
         let mut detector = StaleRunDetector::new(cfg);
         detector.record_progress();
-        thread::sleep(StdDuration::from_millis(100));
-        assert!(matches!(detector.check(), StaleStatus::Stale { .. }));
+        assert!(matches!(
+            detector.check_with_elapsed(StdDuration::from_millis(100)),
+            StaleStatus::Stale { .. }
+        ));
     }
 
     #[test]
@@ -191,5 +198,14 @@ mod tests {
         // Each tier should produce a distinct message.
         assert_ne!(short, medium);
         assert_ne!(medium, long);
+    }
+
+    #[test]
+    fn explicit_elapsed_below_threshold_is_ok() {
+        let detector = StaleRunDetector::new(StaleDetectorConfig::new(1_000));
+        assert_eq!(
+            detector.check_with_elapsed(StdDuration::from_millis(999)),
+            StaleStatus::Ok
+        );
     }
 }

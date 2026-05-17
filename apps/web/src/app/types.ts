@@ -109,3 +109,13 @@ export interface LedgerStateChange {
     before?: string;
     after?: string;
 }
+
+export type CampaignSeedSource = 'random' | 'corpus' | 'replay';
+export type CampaignAuthMode = 'none' | 'mock' | 'keypair';
+
+export interface CampaignConfig {
+    seedSource: CampaignSeedSource;
+    authMode: CampaignAuthMode;
+    parallelism: number;
+    timeoutSeconds: number;
+}

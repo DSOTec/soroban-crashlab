@@ -5,6 +5,7 @@
 //! server-side 5xx responses).
 
 use crate::prng::SeededPrng;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// Classification of errors encountered during simulation or RPC calls.
@@ -41,22 +42,26 @@ impl SimulationError {
 }
 
 /// Configuration for the retry strategy.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct RetryConfig {
     /// Maximum number of attempts allowed (including the initial call).
     pub max_attempts: u32,
-    /// Initial backoff duration after the first failure.
-    pub initial_backoff: Duration,
-    /// Maximum backoff duration allowed for any single retry.
-    pub max_backoff: Duration,
+    /// Base delay in milliseconds before the first retry.
+    pub base_delay_ms: u64,
+    /// Maximum backoff duration allowed for any single retry (milliseconds).
+    pub max_delay_ms: u64,
+    /// Proportion of the computed delay that is randomized (0.0 to 1.0).
+    /// 0.0 means no jitter, 1.0 means full jitter.
+    pub jitter_factor: f64,
 }
 
 impl Default for RetryConfig {
     fn default() -> Self {
         Self {
-            max_attempts: 5,
-            initial_backoff: Duration::from_millis(100),
-            max_backoff: Duration::from_secs(10),
+            max_attempts: 3,
+            base_delay_ms: 100,
+            max_delay_ms: 2000,
+            jitter_factor: 0.5,
         }
     }
 }
@@ -74,20 +79,17 @@ pub fn execute_with_retry<F, T>(
 where
     F: FnMut() -> Result<T, SimulationError>,
 {
-    let mut attempt = 1;
+    let mut attempt = 0; // 0-indexed for calculation
     loop {
         match f() {
             Ok(val) => return Ok(val),
-            Err(e) if e.is_transient() && attempt < config.max_attempts => {
+            Err(e) if e.is_transient() && attempt + 1 < config.max_attempts => {
                 let backoff = calculate_backoff(config, attempt, prng.as_deref_mut());
+
                 #[cfg(not(test))]
                 std::thread::sleep(backoff);
                 #[cfg(test)]
                 std::hint::black_box(backoff);
-
-                // In tests, we might want to avoid actual sleep to keep them fast.
-                // However, the prompt implies "bounded retry strategy... in the soroban-crashlab runtime".
-                // If we are in a library, sleep is usually avoided unless it's a dedicated executor.
 
                 attempt += 1;
             }
@@ -100,28 +102,25 @@ where
 /// exponential backoff with jitter.
 ///
 /// Formula: `backoff = min(max_backoff, initial_backoff * 2^(effort-1)) * jitter`
+/// Formula: `delay = base_delay_ms * 2^attempt`, capped at `max_delay_ms`.
+/// Jitter: `random(0, delay * jitter_factor) + delay * (1 - jitter_factor)`.
 pub fn calculate_backoff(
     config: &RetryConfig,
     attempt: u32,
     prng: Option<&mut SeededPrng>,
 ) -> Duration {
-    if attempt == 0 {
-        return Duration::ZERO;
-    }
+    let multiplier = 2u64.saturating_pow(attempt);
+    let base_backoff = config.base_delay_ms.saturating_mul(multiplier);
+    let capped_backoff = std::cmp::min(base_backoff, config.max_delay_ms);
 
-    let multiplier = 2u32.saturating_pow(attempt - 1);
-    let base_backoff = config.initial_backoff.saturating_mul(multiplier);
-    let capped_backoff = std::cmp::min(base_backoff, config.max_backoff);
+    let delay_f64 = capped_backoff as f64;
+    let jitter_range = delay_f64 * config.jitter_factor;
+    let fixed_part = delay_f64 * (1.0 - config.jitter_factor);
 
-    // Apply jitter (0.5 to 1.5 of the capped backoff)
     let jitter_factor = if let Some(p) = prng {
         // Use deterministic PRNG for stable tests
-        // Convert u64 to f64 in range [0.0, 1.0)
-        let random_u64 = p.next_u64();
-        let normalized = (random_u64 as f64) / (u64::MAX as f64);
-        0.5 + normalized
+        p.next_f64()
     } else {
-        // Fallback to simple pseudo-randomness if no PRNG provided
         #[cfg(not(test))]
         {
             use std::time::SystemTime;
@@ -130,16 +129,16 @@ pub fn calculate_backoff(
                 .unwrap_or(Duration::ZERO)
                 .as_nanos() as u64;
             let mut p = SeededPrng::new(seed);
-            let random_u64 = p.next_u64();
-            let normalized = (random_u64 as f64) / (u64::MAX as f64);
-            0.5 + normalized
+            p.next_f64()
         }
         #[cfg(test)]
-        1.0
+        {
+            0.5
+        }
     };
 
-    let nanos = (capped_backoff.as_nanos() as f64 * jitter_factor) as u64;
-    Duration::from_nanos(nanos)
+    let random_component = jitter_factor * jitter_range;
+    Duration::from_millis((random_component + fixed_part) as u64)
 }
 
 #[cfg(test)]
@@ -158,26 +157,27 @@ mod tests {
     fn backoff_increases_exponentially() {
         let config = RetryConfig {
             max_attempts: 5,
-            initial_backoff: Duration::from_millis(100),
-            max_backoff: Duration::from_secs(10),
+            base_delay_ms: 100,
+            max_delay_ms: 10000,
+            jitter_factor: 0.0, // No jitter for deterministic test
         };
 
-        // No jitter for this test
-        let b1 = calculate_backoff(&config, 1, None); // 100ms
-        let b2 = calculate_backoff(&config, 2, None); // 200ms
-        let b3 = calculate_backoff(&config, 3, None); // 400ms
+        let b0 = calculate_backoff(&config, 0, None); // 100ms
+        let b1 = calculate_backoff(&config, 1, None); // 200ms
+        let b2 = calculate_backoff(&config, 2, None); // 400ms
 
-        assert_eq!(b1, Duration::from_millis(100));
-        assert_eq!(b2, Duration::from_millis(200));
-        assert_eq!(b3, Duration::from_millis(400));
+        assert_eq!(b0, Duration::from_millis(100));
+        assert_eq!(b1, Duration::from_millis(200));
+        assert_eq!(b2, Duration::from_millis(400));
     }
 
     #[test]
     fn backoff_is_capped() {
         let config = RetryConfig {
             max_attempts: 10,
-            initial_backoff: Duration::from_millis(100),
-            max_backoff: Duration::from_millis(500),
+            base_delay_ms: 100,
+            max_delay_ms: 500,
+            jitter_factor: 0.0,
         };
 
         let b_default = calculate_backoff(&config, 10, None);
@@ -190,20 +190,19 @@ mod tests {
         let mut prng1 = SeededPrng::new(42);
         let mut prng2 = SeededPrng::new(42);
 
-        let b1 = calculate_backoff(&config, 2, Some(&mut prng1));
-        let b2 = calculate_backoff(&config, 2, Some(&mut prng2));
+        let b1 = calculate_backoff(&config, 1, Some(&mut prng1));
+        let b2 = calculate_backoff(&config, 1, Some(&mut prng2));
 
         assert_eq!(b1, b2);
-        // With seed 42, next_f64 should not be exactly 0.5 (which would give factor 1.0)
-        assert_ne!(b1, Duration::from_millis(200));
     }
 
     #[test]
     fn executor_retries_on_transient() {
         let config = RetryConfig {
             max_attempts: 3,
-            initial_backoff: Duration::from_millis(1),
-            max_backoff: Duration::from_millis(10),
+            base_delay_ms: 1,
+            max_delay_ms: 10,
+            jitter_factor: 0.0,
         };
 
         let mut calls = 0;
@@ -224,8 +223,9 @@ mod tests {
     fn executor_fails_after_max_attempts() {
         let config = RetryConfig {
             max_attempts: 2,
-            initial_backoff: Duration::from_millis(1),
-            max_backoff: Duration::from_millis(10),
+            base_delay_ms: 1,
+            max_delay_ms: 10,
+            jitter_factor: 0.0,
         };
 
         let mut calls = 0;

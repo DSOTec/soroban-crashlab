@@ -45,6 +45,18 @@ export default function RootLayout({
           </div>
           <div className="flex items-center gap-4">
             <nav className="flex gap-4 text-sm font-medium">
+              <Link
+                href="/logs"
+                className="hover:text-blue-600 dark:hover:text-blue-400 transition-colors"
+              >
+                Logs
+              </Link>
+              <Link
+                href="/triage"
+                className="hover:text-blue-600 dark:hover:text-blue-400 transition-colors"
+              >
+                Triage
+              </Link>
               <a
                 href="/add-accessible-keyboard-nav-blueprint-page-49"
                 className="hover:text-blue-600 dark:hover:text-blue-400 transition-colors"

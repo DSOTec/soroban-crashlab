@@ -1,0 +1,32 @@
+name: RFC (Request for Comments)
+description: Design document for high-complexity work.
+labels: [rfc, "complexity:high"]
+body:
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: What problem are we solving and why is it important?
+    validations:
+      required: true
+  - type: textarea
+    id: design
+    attributes:
+      label: Design
+      description: Proposed technical architecture and implementation details.
+    validations:
+      required: true
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks
+      description: Potential downsides, security implications, or backwards-compatibility issues.
+    validations:
+      required: true
+  - type: textarea
+    id: rollout_plan
+    attributes:
+      label: Rollout Plan
+      description: How will this be tested, deployed, and monitored?
+    validations:
+      required: true

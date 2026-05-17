@@ -1,8 +1,10 @@
 //! Campaign run checkpoints for resuming interrupted fuzzing without redoing work.
 //!
 //! Persist [`RunCheckpoint`] as JSON and reload before continuing a campaign.
-//! The checkpoint records the next seed index to process; seeds with indices
-//! `< next_seed_index` are treated as already completed.
+//! The checkpoint records the next global seed index a resumed worker should
+//! examine. In single-worker runs, seeds with indices `< next_seed_index` are
+//! already completed. In partitioned runs, each worker keeps its own checkpoint
+//! file and may also skip unowned indices below the cursor.
 
 use crate::CaseSeed;
 use serde::{Deserialize, Serialize};
@@ -17,7 +19,7 @@ pub struct RunCheckpoint {
     pub schema: u32,
     /// Stable identifier for the campaign (caller-defined).
     pub campaign_id: String,
-    /// Index into the original seed schedule; seeds `[0..next_seed_index)` are done.
+    /// Next global seed index a resumed worker should inspect.
     pub next_seed_index: usize,
     /// Total seeds in the schedule when the checkpoint was written (for validation).
     pub total_seeds: usize,
@@ -26,6 +28,8 @@ pub struct RunCheckpoint {
 /// Errors when applying a checkpoint to a seed slice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckpointError {
+    /// Recorded campaign does not match the run being resumed.
+    CampaignMismatch { recorded: String, actual: String },
     /// `next_seed_index` is past the end of the provided slice.
     IndexPastEnd {
         next_seed_index: usize,
@@ -38,6 +42,10 @@ pub enum CheckpointError {
 impl std::fmt::Display for CheckpointError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            CheckpointError::CampaignMismatch { recorded, actual } => write!(
+                f,
+                "checkpoint campaign_id {recorded:?} does not match requested campaign {actual:?}"
+            ),
             CheckpointError::IndexPastEnd {
                 next_seed_index,
                 seeds_len,
@@ -68,19 +76,35 @@ impl RunCheckpoint {
 
     /// Seeds still to process, or an error if the checkpoint does not match `seeds`.
     pub fn remaining<'a>(&self, seeds: &'a [CaseSeed]) -> Result<&'a [CaseSeed], CheckpointError> {
-        if self.total_seeds != seeds.len() {
+        self.validate_run(&self.campaign_id, seeds.len())?;
+        Ok(&seeds[self.next_seed_index..])
+    }
+
+    /// Validates that the checkpoint matches the intended campaign and schedule length.
+    pub fn validate_run(
+        &self,
+        campaign_id: &str,
+        total_seeds: usize,
+    ) -> Result<(), CheckpointError> {
+        if self.campaign_id != campaign_id {
+            return Err(CheckpointError::CampaignMismatch {
+                recorded: self.campaign_id.clone(),
+                actual: campaign_id.to_string(),
+            });
+        }
+        if self.total_seeds != total_seeds {
             return Err(CheckpointError::TotalMismatch {
                 recorded: self.total_seeds,
-                actual: seeds.len(),
+                actual: total_seeds,
             });
         }
-        if self.next_seed_index > seeds.len() {
+        if self.next_seed_index > total_seeds {
             return Err(CheckpointError::IndexPastEnd {
                 next_seed_index: self.next_seed_index,
-                seeds_len: seeds.len(),
+                seeds_len: total_seeds,
             });
         }
-        Ok(&seeds[self.next_seed_index..])
+        Ok(())
     }
 
     /// Marks one seed as completed (advances by one).
@@ -158,6 +182,16 @@ mod tests {
         assert!(matches!(
             cp.remaining(&s),
             Err(CheckpointError::TotalMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_run_rejects_campaign_mismatch() {
+        let s = seeds(5);
+        let cp = RunCheckpoint::new_run("c1", &s);
+        assert!(matches!(
+            cp.validate_run("c2", s.len()),
+            Err(CheckpointError::CampaignMismatch { .. })
         ));
     }
 

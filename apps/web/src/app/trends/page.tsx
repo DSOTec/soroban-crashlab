@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import Link from 'next/link';
 import { RunArea, RunSeverity, FuzzingRun } from '../types';
 import { FilterBar } from './FilterBar';
 import { CrashTrendChart } from './CrashTrendChart';
@@ -81,8 +82,18 @@ export default function CrashTrendPage() {
     <div className="min-h-screen bg-white dark:bg-zinc-950">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Header */}
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-zinc-900 dark:text-zinc-100 mb-2">
+        <div className="mb-8 flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+          <div>
+            <Link
+              href="/"
+              className="inline-flex items-center gap-1.5 text-sm text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 mb-4 transition"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+              </svg>
+              Back to Dashboard
+            </Link>
+            <h1 className="text-3xl font-bold text-zinc-900 dark:text-zinc-100 mb-2">
             Crash Signature Trends
           </h1>
           <p className="text-zinc-600 dark:text-zinc-400">
@@ -91,6 +102,7 @@ export default function CrashTrendPage() {
             trends that matter.
           </p>
         </div>
+      </div>
 
         {/* No data state */}
         {hasNoRuns ? (

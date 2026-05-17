@@ -69,6 +69,12 @@ When splitting a campaign across workers, use `WorkerPartition` and `drive_run_p
 
 **Guarantee**: Per-seed outputs (classification, signatures, mutation) depend only on the seed index and payload, not on worker count. Merging worker results sorted by global seed index matches a single-worker `drive_run` over the same schedule.
 
+### Checkpoint resume
+
+Persist `RunCheckpoint` as JSON and resume with `drive_run_from_checkpoint` (single worker) or `drive_run_partitioned_from_checkpoint` (per-worker resume). The checkpoint cursor always points at the next global seed index to inspect, and it advances only after the current seed index has been fully accounted for.
+
+**Guarantee**: Restarting from the same checkpoint replays the same remaining seed order without reprocessing seed indices already covered by that checkpoint.
+
 ## Known Limitations
 
 ### Environment-Dependent Factors
@@ -120,6 +126,12 @@ let problematic = vec![1e-300, 1e300];  // May cause precision issues
 When running multiple seeds in parallel, the order of result collection is non-deterministic. Individual seed results remain deterministic, but aggregated reports may list them in different orders.
 
 **Recommendation**: Sort results by seed ID before comparison.
+
+### Concurrent checkpoint writers
+
+Checkpoint files are not locked. Two workers resuming from the same checkpoint file can overwrite each other's progress and reprocess work.
+
+**Recommendation**: Use one checkpoint file per worker partition and avoid sharing a single checkpoint path across concurrent runners.
 
 ## Stability Verification
 

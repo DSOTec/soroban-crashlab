@@ -16,26 +16,14 @@
 
 import React, { useState } from 'react';
 
-export type AuthProviderType = 'stellar-wallet' | 'oauth' | 'api-key';
-export type AuthProviderStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
-export type SorobanAuthMode = 'Enforce' | 'Record' | 'RecordAllowNonroot';
-
-export interface AuthProvider {
-  id: string;
-  type: AuthProviderType;
-  label: string;
-  description: string;
-  status: AuthProviderStatus;
-  identity?: string;
-  errorMessage?: string;
-  lastVerified?: string;
-}
-
-export interface AuthModeProbeResult {
-  mode: SorobanAuthMode;
-  status: 'ok' | 'diverged' | 'untested';
-  notes?: string;
-}
+import {
+  AuthProviderType,
+  AuthProviderStatus,
+  SorobanAuthMode,
+  AuthProvider,
+  AuthModeProbeResult,
+  formatVerified
+} from './integrate-external-authentication-integration-utils';
 
 const INITIAL_PROVIDERS: AuthProvider[] = [
   {
@@ -113,11 +101,7 @@ const MODE_PROBE_STYLES: Record<AuthModeProbeResult['status'], string> = {
   untested: 'text-zinc-400 dark:text-zinc-500',
 };
 
-function formatVerified(iso?: string): string {
-  if (!iso) return '';
-  const d = new Date(iso);
-  return `Verified ${d.toLocaleString()}`;
-}
+
 
 export default function ExternalAuthenticationIntegration() {
   const [providers, setProviders] = useState<AuthProvider[]>(INITIAL_PROVIDERS);

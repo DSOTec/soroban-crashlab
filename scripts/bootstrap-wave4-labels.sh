@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# scripts/bootstrap-wave4-labels.sh
+# Automate creation of standard labels used by backlog and triage for Wave 4.
+
 set -euo pipefail
 
 REPO="SorobanCrashLab/soroban-crashlab"
@@ -106,7 +109,7 @@ upsert_label() {
   fi
 }
 
-echo "Bootstrapping standard Wave labels for $REPO"
+echo "Bootstrapping standard Wave 4 labels for $REPO"
 
 upsert_label "wave4" "1f6feb" "Stellar Wave 4 issue backlog"
 upsert_label "Stellar Wave" "5319e7" "Wave participation tracking"
@@ -122,6 +125,7 @@ upsert_label "area:ops" "8250df" "Maintainer operations"
 upsert_label "area:security" "b60205" "Security policies"
 upsert_label "type:task" "d4c5f9" "Engineering task"
 upsert_label "type:feature" "a2eeef" "Feature work"
+upsert_label "rfc" "006b75" "Request for Comments"
 upsert_label "blocked" "d93f0b" "Blocked on dependency or external factor"
 upsert_label "stale" "ededed" "No contributor response within SLA window"
 

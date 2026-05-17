@@ -193,6 +193,22 @@ where
         }
     }
 
+    // Pass 2: Zeroing simplification.
+    // Try to replace each byte with 0x00 if it isn't already.
+    for i in 0..best.payload.len() {
+        if best.payload[i] == 0 {
+            continue;
+        }
+
+        let mut candidate = best.clone();
+        candidate.payload[i] = 0;
+
+        let sig = execute_with_retry(&config, None, || reproducer(&candidate))?;
+        if sig == *expected {
+            best = candidate;
+        }
+    }
+
     Ok(best)
 }
 
@@ -269,18 +285,16 @@ mod tests {
         let detector = FlakyDetector::new(4, 0.6);
         let counter = Cell::new(0u32);
 
-        let report = detector
-            .check(&bundle, |_| {
-                let n = counter.get();
-                counter.set(n + 1);
-                // Even calls reproduce correctly; odd calls diverge → 2/4 stable.
-                if n % 2 == 0 {
-                    Ok(bundle.signature.clone())
-                } else {
-                    Ok(divergent_sig())
-                }
-            })
-            .unwrap();
+        let report = detector.check(&bundle, |_| {
+            let n = counter.get();
+            counter.set(n + 1);
+            // Even calls reproduce correctly; odd calls diverge → 2/4 stable.
+            if n % 2 == 0 {
+                Ok(bundle.signature.clone())
+            } else {
+                Ok(divergent_sig())
+            }
+        }).unwrap();
 
         assert_eq!(report.stable_count, 2);
         assert!((report.flake_rate - 0.5).abs() < f64::EPSILON);
@@ -504,5 +518,62 @@ mod tests {
 
         assert!(shrunk.seed.payload.len() <= bundle.seed.payload.len());
         assert_eq!(anchor_signature(&shrunk.seed).unwrap(), bundle.signature);
+    }
+
+    #[test]
+    fn shrink_seed_zeros_out_superfluous_bytes() {
+        // [0xAA, 0xBB] is the anchor. 0xCC is not strictly needed but cannot be removed
+        // if the anchor signature check was more complex, but here we'll simulate
+        // that 0xCC is "observed" and must be present, but can be zeroed.
+        fn custom_sig(seed: &CaseSeed) -> Result<CrashSignature, SimulationError> {
+            let has_anchor = seed.payload.windows(2).any(|w| w == [0xAA, 0xBB]);
+            let has_observed = seed.payload.contains(&0xCC) || seed.payload.contains(&0x00);
+            if has_anchor && has_observed {
+                Ok(CrashSignature {
+                    category: "runtime-failure".to_string(),
+                    digest: 0x1234,
+                    signature_hash: 0x7777,
+                })
+            } else {
+                Ok(divergent_sig())
+            }
+        }
+
+        let seed = CaseSeed {
+            id: 123,
+            payload: vec![0xCC, 0xAA, 0xBB],
+        };
+        let expected = custom_sig(&seed).unwrap();
+
+        let shrunk = shrink_seed_preserving_signature(&seed, &expected, custom_sig).unwrap();
+
+        // Should have zeroed 0xCC but kept the length if removal was not possible.
+        // Wait, in this case 0xCC *could* be removed if the signature allows it.
+        // Let's make it so it MUST be there but can be 0.
+        
+        assert_eq!(shrunk.payload, vec![0x00, 0xAA, 0xBB]);
+    }
+
+    #[test]
+    fn shrink_seed_handles_empty_payload() {
+        let seed = CaseSeed { id: 1, payload: vec![] };
+        let expected = CrashSignature { category: "empty".into(), digest: 0, signature_hash: 0 };
+        let shrunk = shrink_seed_preserving_signature(&seed, &expected, |_| Ok(expected.clone())).unwrap();
+        assert!(shrunk.payload.is_empty());
+    }
+
+    #[test]
+    fn shrink_seed_stops_at_minimal_case() {
+        let seed = CaseSeed { id: 1, payload: vec![0xAA] };
+        let expected = CrashSignature { category: "one".into(), digest: 1, signature_hash: 1 };
+        let expected_clone = expected.clone();
+        let shrunk = shrink_seed_preserving_signature(&seed, &expected, move |s| {
+            if s.payload.len() == 1 && s.payload[0] == 0xAA {
+                Ok(expected_clone.clone())
+            } else {
+                Ok(divergent_sig())
+            }
+        }).unwrap();
+        assert_eq!(shrunk.payload, vec![0xAA]);
     }
 }
