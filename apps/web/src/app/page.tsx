@@ -266,6 +266,7 @@ function HomeContent() {
 
   const filteredRuns = useMemo(() => {
     return runs.filter((run) => {
+      // Apply legacy URL query param filters first (preserved for backward compatibility)
       if (statusFilter !== "all" && run.status !== statusFilter) {
         return false;
       }
@@ -275,9 +276,80 @@ function HomeContent() {
       if (expensiveOnly && !isExpensiveRun(run)) {
         return false;
       }
+
+      // Apply dashboardFilters: status (multi-select)
+      if (dashboardFilters.status.length > 0 && !dashboardFilters.status.includes(run.status)) {
+        return false;
+      }
+
+      // Apply dashboardFilters: area (multi-select)
+      if (dashboardFilters.area.length > 0 && !dashboardFilters.area.includes(run.area)) {
+        return false;
+      }
+
+      // Apply dashboardFilters: severity (multi-select)
+      if (dashboardFilters.severity.length > 0 && !dashboardFilters.severity.includes(run.severity)) {
+        return false;
+      }
+
+      // Apply dashboardFilters: dateRange (range filter on optional queuedAt field)
+      if (dashboardFilters.dateRange.start !== '' || dashboardFilters.dateRange.end !== '') {
+        if (!run.queuedAt) {
+          // Missing queuedAt fails date filter when date filter is active
+          return false;
+        }
+        const runDate = new Date(run.queuedAt);
+        if (dashboardFilters.dateRange.start !== '') {
+          const startDate = new Date(dashboardFilters.dateRange.start);
+          if (runDate < startDate) {
+            return false;
+          }
+        }
+        if (dashboardFilters.dateRange.end !== '') {
+          const endDate = new Date(dashboardFilters.dateRange.end);
+          if (runDate > endDate) {
+            return false;
+          }
+        }
+      }
+
+      // Apply dashboardFilters: durationRange (numeric range in milliseconds)
+      if (dashboardFilters.durationRange.min > 0 && run.duration < dashboardFilters.durationRange.min) {
+        return false;
+      }
+      if (dashboardFilters.durationRange.max > 0 && run.duration > dashboardFilters.durationRange.max) {
+        return false;
+      }
+
+      // Apply dashboardFilters: resourceFeeRange (numeric range in stroops)
+      if (dashboardFilters.resourceFeeRange.min > 0 && run.minResourceFee < dashboardFilters.resourceFeeRange.min) {
+        return false;
+      }
+      if (dashboardFilters.resourceFeeRange.max > 0 && run.minResourceFee > dashboardFilters.resourceFeeRange.max) {
+        return false;
+      }
+
+      // Apply dashboardFilters: hasCrash (tri-state boolean filter)
+      if (dashboardFilters.hasCrash !== null) {
+        const runHasCrash = run.crashDetail !== null;
+        if (runHasCrash !== dashboardFilters.hasCrash) {
+          return false;
+        }
+      }
+
+      // Apply dashboardFilters: searchTerm (case-insensitive substring on id and signature)
+      if (dashboardFilters.searchTerm !== '') {
+        const searchLower = dashboardFilters.searchTerm.toLowerCase();
+        const matchesId = run.id.toLowerCase().includes(searchLower);
+        const matchesSignature = run.crashDetail?.signature?.toLowerCase().includes(searchLower) ?? false;
+        if (!matchesId && !matchesSignature) {
+          return false;
+        }
+      }
+
       return true;
     });
-  }, [runs, statusFilter, severityFilter, expensiveOnly]);
+  }, [runs, statusFilter, severityFilter, expensiveOnly, dashboardFilters]);
   const stableQueryString = useMemo(
     () => toStableQueryString(new URLSearchParams(searchParams.toString())),
     [searchParams],
