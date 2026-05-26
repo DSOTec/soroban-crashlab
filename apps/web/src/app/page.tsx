@@ -146,6 +146,9 @@ function HomeContent() {
     searchTerm: '',
   });
 
+  // Check if demo loading mode is enabled via query flag
+  const demoLoading = searchParams.get("demoLoading") === "1";
+
   const handleToggleRunSelection = useCallback((runId: string) => {
     setSelectedRunIds(prev => {
       const next = new Set(prev);
@@ -373,8 +376,8 @@ function HomeContent() {
         await new Promise<void>((resolve, reject) => {
           const t = window.setTimeout(() => {
             if (ctrl.signal.aborted) return;
-            // ~10% chance of simulated failure to exercise the error path.
-            if (Math.random() < 0.1)
+            // Only simulate failure when demoLoading flag is present
+            if (demoLoading && Math.random() < 0.1)
               reject(new Error("Simulated network error"));
             else resolve();
           }, 800);
@@ -397,7 +400,7 @@ function HomeContent() {
       ctrl.abort();
       window.clearTimeout(t);
     };
-  }, [fetchAttempt]);
+  }, [fetchAttempt, demoLoading]);
 
   useEffect(() => {
     if (selectedRunId && !selectedRun) {
