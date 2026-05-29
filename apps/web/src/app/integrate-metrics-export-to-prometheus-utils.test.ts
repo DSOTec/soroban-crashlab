@@ -7,6 +7,7 @@ import {
   ExportConfig,
   MetricsExportDependencies,
 } from './integrate-metrics-export-to-prometheus-utils';
+import { createPrometheusMetricsExportDependencies } from '../lib/integrations/prometheus-adapter';
 
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(`Assertion failed: ${message}`);
@@ -137,6 +138,44 @@ async function testRunMetricsExportIntegrationFlow_healthFailure(): Promise<void
   console.log('✓ testRunMetricsExportIntegrationFlow_healthFailure passed');
 }
 
+async function testCreatePrometheusMetricsExportDependencies(): Promise<void> {
+  const requests: Array<{ url: string; init?: RequestInit }> = [];
+  const deps = createPrometheusMetricsExportDependencies({
+    endpoint: 'https://prometheus.internal.crashlab.io/metrics',
+    interval: 30,
+    labels: { env: 'production' },
+    fetchImpl: async (input, init) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      requests.push({ url, init });
+
+      if ((init?.method ?? 'GET') === 'POST') {
+        return new Response(JSON.stringify({ pushedSeries: 6 }), {
+          status: 202,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    },
+  });
+
+  const config = await deps.resolveConfig();
+  assert(config !== null, 'adapter should resolve a config when enabled');
+  assert(config?.endpoint === 'https://prometheus.internal.crashlab.io/metrics', 'adapter should normalize endpoint');
+
+  const push = await deps.pushMetrics(config!);
+  assert(push.accepted, 'adapter should accept successful push responses');
+  assert(push.pushedSeries === 6, 'adapter should surface pushed series count');
+
+  const health = await deps.queryExporterHealth(config!.endpoint);
+  assert(health.healthy, 'adapter should mark healthy endpoints as healthy');
+  assert(health.statusCode === 200, 'adapter should surface health status code');
+  assert(requests.length === 2, 'adapter should perform push and health requests');
+  assert(requests[0].init?.method === 'POST', 'first request should push metrics');
+  assert(requests[1].init?.method === 'GET', 'second request should query health');
+  console.log('✓ testCreatePrometheusMetricsExportDependencies passed');
+}
+
 async function runAllTests(): Promise<void> {
   console.log('Running Metrics Export to Prometheus Utils Tests...\\n');
   try {
@@ -151,6 +190,7 @@ async function runAllTests(): Promise<void> {
     await testRunMetricsExportIntegrationFlow_configUnavailable();
     await testRunMetricsExportIntegrationFlow_edgePushRejected();
     await testRunMetricsExportIntegrationFlow_healthFailure();
+    await testCreatePrometheusMetricsExportDependencies();
     console.log('\\n✅ All Metrics Export to Prometheus utils tests passed!');
   } catch (error) {
     console.error('\\n❌ Test failed:', error);
