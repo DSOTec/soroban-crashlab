@@ -208,7 +208,7 @@ export default function IntegrationsHub() {
               Missing an integration?
             </h2>
             <p className="text-zinc-600 dark:text-zinc-400 leading-relaxed">
-              We're constantly adding new integrations to help you get the most out of SorobanCrashLab. 
+              We&apos;re constantly adding new integrations to help you get the most out of SorobanCrashLab. 
               If you have a feature request or integration idea, please open an issue on our GitHub repository.
             </p>
             <div className="pt-4">
