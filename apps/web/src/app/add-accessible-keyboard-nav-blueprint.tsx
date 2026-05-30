@@ -43,8 +43,25 @@ export default function AddAccessibleKeyboardNavBlueprint() {
   const modalRef = useRef<HTMLDivElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
 
+  const resolveMainContentTarget = useCallback((): HTMLElement | null => {
+    const byId = document.getElementById('main-content');
+    if (byId) {
+      return byId;
+    }
+
+    const mainElement = document.querySelector<HTMLElement>('main, [role="main"]');
+    if (mainElement) {
+      if (!mainElement.id) {
+        mainElement.id = 'main-content';
+      }
+      return mainElement;
+    }
+
+    return null;
+  }, []);
+
   const handleSkipLinkClick = useCallback((event: MouseEvent<HTMLAnchorElement>) => {
-    const target = document.getElementById('main-content');
+    const target = resolveMainContentTarget();
     if (!target) {
       return;
     }
@@ -64,7 +81,7 @@ export default function AddAccessibleKeyboardNavBlueprint() {
         target.removeAttribute('tabindex');
       }, 0);
     }
-  }, []);
+  }, [resolveMainContentTarget]);
 
   const toggleHelp = useCallback(() => {
     setIsHelpOpen((prev) => !prev);
