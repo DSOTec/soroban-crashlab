@@ -22,7 +22,9 @@ import {
   MetricPoint,
   ExportConfig,
   generateInitialData,
-  analyzeTrend
+  analyzeTrend,
+  runMetricsExportIntegrationFlow,
+  MetricsExportDependencies
 } from './integrate-metrics-export-to-prometheus-utils';
 
 const DEFAULT_CONFIG: ExportConfig = {
@@ -89,7 +91,11 @@ export default function MetricsExportToPrometheus() {
   useEffect(() => {
     if (!config.enabled) return;
 
-    const interval = setInterval(() => {
+    // Use configured interval for polling (seconds). This replaces a hardcoded mock timer.
+    let cancelled = false;
+
+    const tick = async () => {
+      if (cancelled) return;
       setLatencyData(prev => {
         const newData = [...prev.slice(1), {
           time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
@@ -97,21 +103,56 @@ export default function MetricsExportToPrometheus() {
         }];
         return newData;
       });
-    }, 3000);
+      // schedule next tick according to configured interval
+      setTimeout(tick, config.interval * 1000);
+    };
 
-    return () => clearInterval(interval);
-  }, [config.enabled]);
+    // start polling
+    setTimeout(tick, config.interval * 1000);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [config.enabled, config.interval]);
 
   const handleTestConnection = async () => {
     setIsTesting(true);
     setTestResult(null);
-    await new Promise(r => setTimeout(r, 1500));
-    const success = Math.random() > 0.1;
-    setTestResult(success ? 'success' : 'error');
-    setIsTesting(false);
+    try {
+      const deps: MetricsExportDependencies = {
+        resolveConfig: async () => ({ ...config }),
+        pushMetrics: async (cfg) => {
+          try {
+            const res = await fetch(cfg.endpoint, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ timestamp: Date.now(), labels: cfg.labels })
+            });
+            return { accepted: res.ok, pushedSeries: res.ok ? 1 : 0 };
+          } catch (e) {
+            return { accepted: false, pushedSeries: 0 };
+          }
+        },
+        queryExporterHealth: async (endpoint) => {
+          try {
+            // Try a lightweight GET to the endpoint to infer reachability
+            const res = await fetch(endpoint, { method: 'GET' });
+            return { healthy: res.ok, statusCode: res.status };
+          } catch (e) {
+            return { healthy: false, statusCode: 0 };
+          }
+        }
+      };
 
-    // Clear result after 3s
-    setTimeout(() => setTestResult(null), 3000);
+      const result = await runMetricsExportIntegrationFlow(deps);
+      setTestResult(result.success ? 'success' : 'error');
+    } catch (e) {
+      setTestResult('error');
+    } finally {
+      setIsTesting(false);
+      // Clear result after 3s
+      setTimeout(() => setTestResult(null), 3000);
+    }
   };
 
   const currentLatency = latencyData[latencyData.length - 1].value;
