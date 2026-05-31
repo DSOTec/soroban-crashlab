@@ -1,0 +1,47 @@
+name: Validate CaseBundle CI
+
+on:
+  push:
+    branches: [main, issue/122-bundle-schema-validation-api]
+    paths:
+      - "apps/web/src/app/api/artifacts/validate/**"
+      - ".github/workflows/validate-casebundle.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "apps/web/src/app/api/artifacts/validate/**"
+      - ".github/workflows/validate-casebundle.yml"
+
+jobs:
+  test:
+    name: Test CaseBundle Validation API
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "npm"
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests
+        run: npx vitest run src/app/api/artifacts/validate/route.test.ts
+
+      - name: Run integration tests
+        run: npx vitest run src/app/api/artifacts/validate/route.integration.test.ts
+
+      - name: Run linter
+        run: npm run lint -- src/app/api/artifacts/validate/
+
+      - name: Type check
+        run: npx tsc --noEmit src/app/api/artifacts/validate/route.ts
