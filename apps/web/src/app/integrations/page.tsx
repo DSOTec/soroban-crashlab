@@ -42,6 +42,19 @@ const INTEGRATIONS: Integration[] = [
     category: 'Testing'
   },
   {
+    id: 'ui-harness',
+    title: 'UI Flow Test Harness',
+    description: 'Automated validation of end-to-end user journeys and interface stability across the platform.',
+    icon: (
+      <svg className="w-12 h-12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+      </svg>
+    ),
+    href: '/integrations/ui-harness',
+    status: 'available',
+    category: 'Testing'
+  },
+  {
     id: 'sanity-check',
     title: 'Sanity Check Pipeline',
     description: 'Automated validation of Soroban contracts, environment, dependencies, and configuration before fuzzing runs.',
