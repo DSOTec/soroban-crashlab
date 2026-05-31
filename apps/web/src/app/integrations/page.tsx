@@ -81,6 +81,19 @@ const INTEGRATIONS: Integration[] = [
     category: 'Triage'
   },
   {
+    id: 'ci',
+    title: 'CI Integration',
+    description: 'Integrate with CI/CD pipelines to run fuzzing tests automatically on code changes.',
+    icon: (
+      <svg className="w-12 h-12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
+      </svg>
+    ),
+    href: '/integrations/ci-replay',
+    status: 'available',
+    category: 'DevOps'
+  },
+  {
     id: 'webhooks',
     title: 'Webhook Manager',
     description: 'Configure external endpoints to receive real-time notifications for fuzzing run lifecycle events.',
@@ -118,19 +131,6 @@ const INTEGRATIONS: Integration[] = [
     href: '#auth',
     status: 'coming-soon',
     category: 'Security'
-  },
-  {
-    id: 'ci',
-    title: 'CI Integration',
-    description: 'Integrate with CI/CD pipelines to run fuzzing tests automatically on code changes.',
-    icon: (
-      <svg className="w-12 h-12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
-      </svg>
-    ),
-    href: '#ci',
-    status: 'coming-soon',
-    category: 'DevOps'
   }
 ];
 
