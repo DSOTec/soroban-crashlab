@@ -10,6 +10,41 @@ Each integration follows the same pattern. There is an adapter file in `apps/web
 
 When the external service is not available or not configured, the integration falls back to mock data so you can test the UI without setting up real credentials.
 
+### Outbound timeout and retry policy
+
+Server-side calls to third parties go through one wrapper,
+`httpCall(name, url, init, policy)` in `apps/web/src/lib/http-call.ts`, so a
+slow or hung provider can never hold a serverless function (10 s limit) or
+leave a test-connection button spinning.
+
+| Setting | Default | Constant |
+| --- | --- | --- |
+| Per-attempt timeout (until response headers) | 4 s | `OUTBOUND_ATTEMPT_TIMEOUT_MS` |
+| Total budget (all attempts, backoff and body read) | 8 s | `OUTBOUND_TOTAL_BUDGET_MS` |
+| Retries after the first attempt | 2 | `DEFAULT_HTTP_CALL_POLICY.maxRetries` |
+| Backoff (equal jitter) | 200 ms base, 2 s cap | `OUTBOUND_RETRY_BASE_MS` / `OUTBOUND_RETRY_MAX_MS` |
+
+- Retries happen on network errors, timeouts, `408`, `429` and `5xx`, and
+  only for idempotent methods (`GET`, `HEAD`, `OPTIONS`, `PUT`, `DELETE`).
+  A `POST` is retried only when the caller passes `idempotent: true` because
+  the provider deduplicates it (PagerDuty's `dedup_key`).
+- `Retry-After` (seconds or HTTP date) is honoured, capped by the backoff
+  ceiling and the remaining budget.
+- Failures are typed: `OutboundTimeoutError` → `INTEGRATION_TIMEOUT` (504)
+  and `OutboundNetworkError` → `INTEGRATION_UNAVAILABLE` (502).
+
+Per-client policies:
+
+| Client | Calls | Attempt timeout | Retried? |
+| --- | --- | --- | --- |
+| PagerDuty | Events API trigger / test-connection | 4 s (`PAGERDUTY_FETCH_TIMEOUT_MS`) | Yes — deduplicated by `dedup_key` |
+| Grafana | `GET /api/health` (test-connection) | 4 s (`GRAFANA_FETCH_TIMEOUT_MS`) | Yes |
+| Grafana | `POST /api/annotations` | 4 s | No — creating an annotation is not idempotent |
+| SMTP (nodemailer) | connect / greeting / idle socket | 5 s / 5 s / 8 s (`SMTP_*_TIMEOUT_MS`) | No |
+
+Slack, Jira, Linear and Datadog will adopt the same wrapper in follow-up
+changes.
+
 ---
 
 ## Sentry
@@ -123,11 +158,19 @@ Webhooks let you send data to any HTTP endpoint when events occur.
 **What this integration does**
 - Fires HTTP POST requests to configured URLs when crashes are detected
 - Includes the full crash payload as JSON in the request body
-- Supports retry with exponential backoff
-- Tracks delivery status and history
+- Retries through a durable, rate-limited retry queue: attempts are
+  persisted and run on the webhook-recovery tick (driven by
+  `POST /api/schedules/tick`) with exponential backoff, jitter and a
+  per-receiver concurrency cap, never inline in the triggering request
+- Drains the dead-letter queue automatically and parks entries that keep
+  failing so they surface in the retry dashboard
+- Tracks delivery status, history and metrics (latency, retries, DLQ depth)
 
 **Files involved**
 - `apps/web/src/lib/webhook-delivery-worker.ts`
+- `apps/web/src/lib/webhook-retry-queue.ts`
+- `apps/web/src/lib/webhook-dlq.ts`
+- `apps/web/src/lib/webhook-recovery.ts`
 - `apps/web/src/app/api/webhooks/route.ts`
 
 ---
@@ -157,6 +200,8 @@ Sends email notifications through an SMTP server.
 **What this integration does**
 - Sends alert emails to configured recipients when crashes are detected
 - Supports multiple notification channels with different severity levels
+- Bounds the SMTP handshake with connection, greeting and socket timeouts
+  (see [Outbound timeout and retry policy](#outbound-timeout-and-retry-policy))
 
 ---
 
