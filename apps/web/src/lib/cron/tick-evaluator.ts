@@ -103,9 +103,14 @@ export function evaluateTick(input: TickInput): TickOutcome {
     return { ...schedule, lastRunAt: lastTickIso };
   });
 
+  // Enforce retention TTL for notification events and webhook delivery history
+  pruneNotificationEvents();
+  getWebhookStore().pruneDeliveryLog();
+
   return {
     schedules,
     history: [...input.history, ...created],
     created,
   };
 }
+
