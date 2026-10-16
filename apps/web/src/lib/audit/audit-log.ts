@@ -31,7 +31,8 @@ export type AuditAction =
   | 'thread.resolve'
   | 'artifact.delete'
   | 'webhook.secret.rotate'
-  | 'webhook.secret.revokeGrace';
+  | 'webhook.secret.revokeGrace'
+  | 'quota.override';
 
 /** Used when no principal could be resolved — availability over attribution. */
 export const SYSTEM_ACTOR = 'system';

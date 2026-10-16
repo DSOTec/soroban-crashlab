@@ -25,6 +25,7 @@ const ACTIONS: Array<AuditAction | 'all'> = [
   'upload.reject',
   'thread.resolve',
   'artifact.delete',
+  'quota.override',
 ];
 
 export default function AuditLogViewer() {
